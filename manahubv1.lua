@@ -9114,7 +9114,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     end
                 end
             })
--- /// AUTO PHOENIX DOWN DROP & RETURN (PSUEDO CHATTED LOGIC) ///
+-- /// AUTO PHOENIX DOWN DROP & RETURN (PERFECT PATH INTERCEPT) ///
             local dropped_phoenix_count = 0
             local is_phoenix_gating = false
 
@@ -9192,14 +9192,15 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 return success
             end
 
-            -- Hàm đọc path để lấy Gate cũ
-            local function get_latest_gate_point()
+            -- Hàm đọc path để lấy Gate gần điểm bắt đầu (Point 1) nhất
+            local function get_first_gate_point()
                 if not mem or not httt then return nil end
-                if not mem:HasItem("current_path") or not mem:HasItem("current_point") then return nil end
+                if not mem:HasItem("current_path") then return nil end
                 local success, path_data = pcall(function() return httt:JSONDecode(mem:GetItem("current_path")) end)
-                local current_index = tonumber(mem:GetItem("current_point"))
-                if success and type(path_data) == "table" and current_index then
-                    for i = current_index, 1, -1 do
+                
+                if success and type(path_data) == "table" then
+                    -- Quét từ điểm 1 trở đi để tìm Gate đầu tiên trong Path
+                    for i = 1, #path_data do
                         local node = path_data[i]
                         if type(node) == "table" then
                             local gate_val = node.Gate or node.GateName or node.gate or node.gatename
@@ -9219,7 +9220,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             group_auto_pickup:AddToggle("auto_phoenix_drop", {
                 Text = "Auto Phoenix Drop (Max 5)",
                 Default = cheat_client.config.auto_phoenix_drop,
-                Tooltip = "Đợi xong Path -> Psuedo Gate Shore 4 -> Drop -> Đợi hết Combat -> Psuedo Gate Về.",
+                Tooltip = "Hoạt động: Đợi đến Last Point -> Gate Shore 4 -> Drop -> Chờ an toàn -> Gate về Start Point.",
                 Callback = function(value)
                     cheat_client.config.auto_phoenix_drop = value
                     if not value then is_phoenix_gating = false end
@@ -9231,7 +9232,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 Numeric = false,
                 Finished = false,
                 Text = "Return Gate Point",
-                Tooltip = "Điểm Gate dự phòng để quay về.",
+                Tooltip = "Điểm Gate dự phòng để quay về nết Path không có record Gate.",
                 Placeholder = "e.g. Desert 1",
                 Callback = function(value)
                     cheat_client.config.phoenix_return_gate = value
@@ -9279,7 +9280,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             if hrp then hrp.Velocity = Vector3.new(0,0,0) end
                         end
 
-                        if library and library.Notify then library:Notify("DEMO: Bắn Remote Gate Shore 4...") end
+                        if library and library.Notify then library:Notify("DEMO: Đang Psuedo Gate Shore 4...") end
 
                         local success = perform_gate("Shore 4")
                         if not success then
@@ -9313,7 +9314,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 end
             })
 
-            -- Vòng Lặp Tự Động Chính
+            -- Vòng Lặp Tự Động Chính (Chặn ở Last Point)
             utility:Connection(rs.Heartbeat, function()
                 if not (Toggles and Toggles.auto_phoenix_drop and Toggles.auto_phoenix_drop.Value) then return end
                 if is_phoenix_gating then return end
@@ -9324,6 +9325,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 local hum = char:FindFirstChildOfClass("Humanoid")
                 if not hum or hum.Health <= 0 then return end
 
+                -- Nếu đang nguy hiểm, chưa được làm gì cả
                 if cs:HasTag(char, "Danger") or cs:HasTag(char, "Knocked") or cs:HasTag(char, "Unconscious") or char:FindFirstChild("Stun") then 
                     return 
                 end
@@ -9343,38 +9345,42 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         was_bot_running = true
                         
                         if library and library.Notify then
-                            library:Notify("Phát hiện PD! Đang đợi xong Path...")
+                            library:Notify("Phát hiện PD! Đang chờ Bot đến Last Point...")
                         end
                         
+                        -- Chặn bot ngay tại điểm cuối (trước khi wait)
                         while mem:GetItem("botstarted") == "true" do
                             local cur_pt = tonumber(mem:GetItem("current_point")) or 1
                             local success, path_data = pcall(function() return httt:JSONDecode(mem:GetItem("current_path") or "[]") end)
                             local total_pts = (success and type(path_data) == "table") and #path_data or 999
                             
-                            if cur_pt >= total_pts - 1 or cur_pt <= 2 then
+                            -- Nếu chạm vào điểm cuối cùng của path -> Break và can thiệp
+                            if cur_pt >= total_pts then
                                 break
                             end
-                            task.wait(1) 
+                            task.wait(0.1) -- Fast poll 0.1s để bắt dính khoảnh khắc đến điểm cuối
                         end
 
+                        -- Lập tức Pause Bot lại không cho nó chạy tiếp hàm wait
                         mem:SetItem("botstarted", "false") 
-                        task.wait(1) 
+                        task.wait(0.5) 
                         
                         local hrp = char:FindFirstChild("HumanoidRootPart")
                         if hrp then hrp.Velocity = Vector3.new(0,0,0) end
                     end
 
-                    if library and library.Notify then library:Notify("Bắt đầu Remote Gate Shore 4...") end
+                    if library and library.Notify then library:Notify("Đã tới Last Point. Bắt đầu Gate tới Shore 4...") end
 
+                    -- --- PSUEDO GATE TO SHORE 4 ---
                     local shore_success = perform_gate("Shore 4")
                     if not shore_success then
-                        if library and library.Notify then library:Notify("Gate Shore 4 Lỗi / Backfire!", 5) end
+                        if library and library.Notify then library:Notify("Gate Shore 4 thất bại hoặc Backfire!", 5) end
                         is_phoenix_gating = false
                         if was_bot_running then mem:SetItem("botstarted", "true") end
                         return
                     end
 
-                    -- Drop PD
+                    -- --- DROP PHOENIX DOWN ---
                     task.wait(1)
                     local current_phoenix = plr.Backpack:FindFirstChild("Phoenix Down") or char:FindFirstChild("Phoenix Down")
                     if current_phoenix then
@@ -9393,31 +9399,33 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         end
                     end
                     
-                    -- Đợi hết Danger (nếu thả PD xong bị quái cắn)
+                    -- --- ĐỢI HẾT COMBAT CHẮC CHẮN ---
                     task.wait(1.5)
                     if cs:HasTag(char, "Danger") then
                         if library and library.Notify then library:Notify("Đang trong Combat! Đợi an toàn để Gate về...") end
                         while cs:HasTag(char, "Danger") or char:FindFirstChild("Stun") or cs:HasTag(char, "Knocked") do
                             task.wait(1)
                         end
-                        task.wait(2) -- Buffer thêm 2s cho chắc chắn
+                        task.wait(2) -- Trễ thêm 2s cho chắc chắn an toàn 100%
                     end
 
-                    -- Gate Về
-                    local path_gate = get_latest_gate_point()
+                    -- --- LẤY ĐIỂM GATE ĐẦU TIÊN CỦA PATH VÀ GATE VỀ ---
+                    local path_gate = get_first_gate_point()
                     local target_location = path_gate or cheat_client.config.phoenix_return_gate or "Desert 1"
                     
-                    if library and library.Notify then library:Notify("An toàn. Đang Remote Gate về " .. target_location) end
+                    if library and library.Notify then library:Notify("An toàn. Đang Psuedo Gate về " .. target_location) end
                     
                     local return_success = perform_gate(target_location)
                     if not return_success then
-                        if library and library.Notify then library:Notify("Lỗi khi Gate về!", 5) end
+                        if library and library.Notify then library:Notify("Lỗi khi Gate về " .. target_location .. "!", 5) end
                     end
 
-                    -- Resume Bot
+                    -- --- TRẢ BOT VỀ POINT 1 ĐỂ BAY LÊN VÀ WAIT ---
                     task.wait(1)
                     if was_bot_running and mem then
                         if library and library.Notify then library:Notify("Khởi động lại Bot ở Point 1!") end
+                        
+                        -- Ép memory về điểm 1, bot sẽ bay từ Gate lên điểm 1 và wait ở đó
                         mem:SetItem("current_point", "1")
                         mem:SetItem("botstarted", "true") 
                     end
