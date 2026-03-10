@@ -9114,16 +9114,44 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     end
                 end
             })
--- /// AUTO PHOENIX DOWN DROP & RETURN FEATURE (STRICT PATH & VIM GATE) ///
+-- /// AUTO PHOENIX DOWN DROP & RETURN FEATURE (TEXTBOX TYPING FIX) ///
             local dropped_phoenix_count = 0
             local is_phoenix_gating = false
+
+            -- Helper function to read the bot's path and find the last gate point
+            local function get_latest_gate_point()
+                if not mem or not httt then return nil end
+                if not mem:HasItem("current_path") or not mem:HasItem("current_point") then return nil end
+                
+                local success, path_data = pcall(function()
+                    return httt:JSONDecode(mem:GetItem("current_path"))
+                end)
+                
+                local current_index = tonumber(mem:GetItem("current_point"))
+                
+                if success and type(path_data) == "table" and current_index then
+                    for i = current_index, 1, -1 do
+                        local node = path_data[i]
+                        if type(node) == "table" then
+                            local gate_val = node.Gate or node.GateName or node.gate or node.gatename
+                            if type(gate_val) == "string" then return gate_val end
+                            
+                            if type(node.Action) == "string" and string.find(node.Action:lower(), "gate") then
+                                local target = node.Target or node.Name or (node.Args and node.Args[1])
+                                if type(target) == "string" then return target end
+                            end
+                        end
+                    end
+                end
+                return nil
+            end
 
             group_auto_pickup:AddDivider()
 
             group_auto_pickup:AddToggle("auto_phoenix_drop", {
                 Text = "Auto Phoenix Drop (Max 5)",
                 Default = cheat_client.config.auto_phoenix_drop,
-                Tooltip = "Waits for run to finish, Snap Gates to Shore 4, drops, Snap Gates to Desert 1.",
+                Tooltip = "Waits for run to finish, types Shore 4 into Gate GUI, drops, and returns.",
                 Callback = function(value)
                     cheat_client.config.auto_phoenix_drop = value
                     if not value then
@@ -9132,7 +9160,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 end
             })
 
-            group_auto_pickup:AddInput("phoenix_return_gate", {
+            group_auto_pickup:AddInput("phoenix_fallback_gate", {
                 Default = cheat_client.config.phoenix_return_gate or "Desert 1",
                 Numeric = false,
                 Finished = false,
@@ -9144,7 +9172,17 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 end
             })
 
-           group_auto_pickup:AddButton({
+            group_auto_pickup:AddButton({
+                Text = "Reset Phoenix Drop Count",
+                Func = function()
+                    dropped_phoenix_count = 0
+                    if library and library.Notify then 
+                        library:Notify("Phoenix Drop count reset to 0.") 
+                    end
+                end
+            })
+
+            group_auto_pickup:AddButton({
                 Text = "DEMO: Force Gate & Drop PD",
                 Tooltip = "Instantly pauses bot, gates Shore 4, and drops PD for testing.",
                 Func = function()
@@ -9204,31 +9242,41 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             utility:RightClick()
                         end
                         
-                        local gate_button = nil
+                        -- FIND TEXTBOX AND TYPE "Shore 4"
+                        local gate_box = nil
                         for i = 1, 20 do 
                             task.wait(0.5)
                             local playerGui = plr:FindFirstChild("PlayerGui")
                             if playerGui then
-                                for _, gui in pairs(playerGui:GetChildren()) do
-                                    for _, element in pairs(gui:GetDescendants()) do
-                                        if element:IsA("TextButton") and (element.Text:find("Shore 4") or element.Text:find("Shore")) then
-                                            gate_button = element
-                                            break
-                                        end
+                                for _, element in pairs(playerGui:GetDescendants()) do
+                                    -- Look for a visible TextBox (ignoring the chat bar)
+                                    if element:IsA("TextBox") and element.Name ~= "ChatBar" and element.Visible then
+                                        gate_box = element
+                                        break
                                     end
-                                    if gate_button then break end
                                 end
                             end
-                            if gate_button then break end
+                            if gate_box then break end
                         end
 
-                        if gate_button then
-                            for _, conn in pairs(getconnections(gate_button.MouseButton1Click)) do
-                                conn:Fire()
+                        if gate_box then
+                            -- Type the text into the box
+                            gate_box.Text = "Shore 4"
+                            task.wait(0.2)
+                            
+                            -- Capture focus and simulate pressing the Enter key
+                            gate_box:CaptureFocus()
+                            task.wait(0.1)
+                            gate_box:ReleaseFocus(true) -- Triggers the "EnterPressed" event internally
+                            
+                            if vim then
+                                vim:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+                                task.wait(0.1)
+                                vim:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
                             end
                             task.wait(5) 
                         else
-                            if library and library.Notify then library:Notify("DEMO: Failed to find Shore 4 button!", 5) end
+                            if library and library.Notify then library:Notify("DEMO: Failed to find Gate TextBox!", 5) end
                             is_phoenix_gating = false
                             if was_bot_running then mem:SetItem("botstarted", "true") end
                             return
@@ -9261,7 +9309,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 end
             })
 
-            -- Background Loop
+            -- Background Loop (Full Run)
             utility:Connection(rs.Heartbeat, function()
                 if not (Toggles and Toggles.auto_phoenix_drop and Toggles.auto_phoenix_drop.Value) then return end
                 if is_phoenix_gating then return end
@@ -9287,7 +9335,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 task.spawn(function()
                     local was_bot_running = false
                     
-                    -- 1. STRICT WAIT FOR PATH TO FINISH
                     if mem and mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true" then
                         was_bot_running = true
                         
@@ -9295,13 +9342,11 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             library:Notify("Phoenix Down found! Waiting to reach the final point...")
                         end
                         
-                        -- Frequently check the current point against the total points
                         while mem:GetItem("botstarted") == "true" do
                             local cur_pt = tonumber(mem:GetItem("current_point")) or 1
                             local success, path_data = pcall(function() return httt:JSONDecode(mem:GetItem("current_path") or "[]") end)
                             local total_pts = (success and type(path_data) == "table") and #path_data or 999
                             
-                            -- If we reached the absolute last point of the path
                             if cur_pt >= total_pts then
                                 break
                             end
@@ -9326,7 +9371,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     hum:EquipTool(gate_spell)
                     task.wait(0.5)
                     
-                    -- Physically fake a Right Mouse Button click to ensure the GUI opens
                     if vim then
                         vim:SendMouseButtonEvent(0, 0, 1, true, game, 1) 
                         task.wait(0.1)
@@ -9335,32 +9379,37 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         utility:RightClick()
                     end
                     
-                    local gate_button = nil
-                    for i = 1, 20 do -- Give it up to 10 seconds to find the GUI
+                    local gate_box = nil
+                    for i = 1, 20 do 
                         task.wait(0.5)
                         local playerGui = plr:FindFirstChild("PlayerGui")
                         if playerGui then
-                            for _, gui in pairs(playerGui:GetChildren()) do
-                                for _, element in pairs(gui:GetDescendants()) do
-                                    if element:IsA("TextButton") and (element.Text:find("Shore 4") or element.Text:find("Shore")) then
-                                        gate_button = element
-                                        break
-                                    end
+                            for _, element in pairs(playerGui:GetDescendants()) do
+                                if element:IsA("TextBox") and element.Name ~= "ChatBar" and element.Visible then
+                                    gate_box = element
+                                    break
                                 end
-                                if gate_button then break end
                             end
                         end
-                        if gate_button then break end
+                        if gate_box then break end
                     end
 
-                    if gate_button then
-                        -- Fire the connections directly instead of firesignal for better bypass
-                        for _, conn in pairs(getconnections(gate_button.MouseButton1Click)) do
-                            conn:Fire()
+                    if gate_box then
+                        gate_box.Text = "Shore 4"
+                        task.wait(0.2)
+                        
+                        gate_box:CaptureFocus()
+                        task.wait(0.1)
+                        gate_box:ReleaseFocus(true)
+                        
+                        if vim then
+                            vim:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+                            task.wait(0.1)
+                            vim:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
                         end
                         task.wait(5) 
                     else
-                        if library and library.Notify then library:Notify("Failed to find Shore 4 button!", 5) end
+                        if library and library.Notify then library:Notify("Failed to find Gate TextBox!", 5) end
                         is_phoenix_gating = false
                         if was_bot_running then mem:SetItem("botstarted", "true") end
                         return
@@ -9402,34 +9451,40 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             utility:RightClick()
                         end
 
-                        local return_button = nil
+                        local return_box = nil
                         local target_location = cheat_client.config.phoenix_return_gate or "Desert 1"
                         
                         for i = 1, 20 do
                             task.wait(0.5)
                             local playerGui = plr:FindFirstChild("PlayerGui")
                             if playerGui then
-                                for _, gui in pairs(playerGui:GetChildren()) do
-                                    for _, element in pairs(gui:GetDescendants()) do
-                                        if element:IsA("TextButton") and element.Text:find(target_location) then
-                                            return_button = element
-                                            break
-                                        end
+                                for _, element in pairs(playerGui:GetDescendants()) do
+                                    if element:IsA("TextBox") and element.Name ~= "ChatBar" and element.Visible then
+                                        return_box = element
+                                        break
                                     end
-                                    if return_button then break end
                                 end
                             end
-                            if return_button then break end
+                            if return_box then break end
                         end
 
-                        if return_button then
-                            for _, conn in pairs(getconnections(return_button.MouseButton1Click)) do
-                                conn:Fire()
+                        if return_box then
+                            return_box.Text = target_location
+                            task.wait(0.2)
+                            
+                            return_box:CaptureFocus()
+                            task.wait(0.1)
+                            return_box:ReleaseFocus(true)
+                            
+                            if vim then
+                                vim:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+                                task.wait(0.1)
+                                vim:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
                             end
                             task.wait(5)
                         else
                             if library and library.Notify then
-                                library:Notify("Failed to find Return Gate point: " .. target_location, 5)
+                                library:Notify("Failed to find Gate TextBox to return!", 5)
                             end
                         end
                     end
