@@ -9314,7 +9314,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 end
             })
 
-            -- Vòng Lặp Tự Động Chính (Chặn ở Last Point)
+          -- Vòng Lặp Tự Động Chính (Logic: Chờ đến Last Point -> Check An Toàn -> Action)
             utility:Connection(rs.Heartbeat, function()
                 if not (Toggles and Toggles.auto_phoenix_drop and Toggles.auto_phoenix_drop.Value) then return end
                 if is_phoenix_gating then return end
@@ -9325,51 +9325,61 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 local hum = char:FindFirstChildOfClass("Humanoid")
                 if not hum or hum.Health <= 0 then return end
 
-                -- Nếu đang nguy hiểm, chưa được làm gì cả
-                if cs:HasTag(char, "Danger") or cs:HasTag(char, "Knocked") or cs:HasTag(char, "Unconscious") or char:FindFirstChild("Stun") then 
-                    return 
-                end
-
                 local phoenix = plr.Backpack:FindFirstChild("Phoenix Down") or char:FindFirstChild("Phoenix Down")
                 if not phoenix then return end
 
                 local gate_spell = plr.Backpack:FindFirstChild("Gate") or char:FindFirstChild("Gate")
                 if not gate_spell then return end
 
+                -- Chú ý: Ta KHÔNG check Danger ở đây nữa, vì ta cần nó lọt vào bên trong task.spawn
+                -- để có thể "chờ đợi" bot chạy đến điểm cuối. 
                 is_phoenix_gating = true
 
                 task.spawn(function()
                     local was_bot_running = false
                     
+                    -- 1. KIỂM TRA CÓ ĐANG BOT KHÔNG
                     if mem and mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true" then
                         was_bot_running = true
                         
                         if library and library.Notify then
-                            library:Notify("Phát hiện PD! Đang chờ Bot đến Last Point...")
+                            library:Notify("Phát hiện PD! Theo dõi Bot đi đến Last Point...")
                         end
                         
-                        -- Chặn bot ngay tại điểm cuối (trước khi wait)
+                        -- 2. ĐỢI CHO ĐẾN KHI CHẠM ĐIỂM CUỐI CÙNG
                         while mem:GetItem("botstarted") == "true" do
                             local cur_pt = tonumber(mem:GetItem("current_point")) or 1
                             local success, path_data = pcall(function() return httt:JSONDecode(mem:GetItem("current_path") or "[]") end)
                             local total_pts = (success and type(path_data) == "table") and #path_data or 999
                             
-                            -- Nếu chạm vào điểm cuối cùng của path -> Break và can thiệp
                             if cur_pt >= total_pts then
                                 break
                             end
-                            task.wait(0.1) -- Fast poll 0.1s để bắt dính khoảnh khắc đến điểm cuối
+                            task.wait(0.2) 
                         end
 
-                        -- Lập tức Pause Bot lại không cho nó chạy tiếp hàm wait
-                        mem:SetItem("botstarted", "false") 
-                        task.wait(0.5) 
-                        
-                        local hrp = char:FindFirstChild("HumanoidRootPart")
-                        if hrp then hrp.Velocity = Vector3.new(0,0,0) end
+                        -- 3. ĐẾN NƠI RỒI -> PAUSE LẠI KHÔNG CHO WAIT
+                        if mem:GetItem("botstarted") == "true" then
+                            mem:SetItem("botstarted", "false") 
+                            task.wait(0.5) 
+                            local hrp = char:FindFirstChild("HumanoidRootPart")
+                            if hrp then hrp.Velocity = Vector3.new(0,0,0) end
+                        else
+                            was_bot_running = false -- Bot bị tắt bằng tay giữa chừng
+                        end
                     end
 
-                    if library and library.Notify then library:Notify("Đã tới Last Point. Bắt đầu Gate tới Shore 4...") end
+                    -- 4. KIỂM TRA COMBAT TRƯỚC KHI GATE
+                    -- Vì trong quá trình chạy bộ đến Last Point có thể dính quái, phải chờ hết Danger mới được Gate
+                    if cs:HasTag(char, "Danger") or cs:HasTag(char, "Knocked") or cs:HasTag(char, "Unconscious") or char:FindFirstChild("Stun") then 
+                        if library and library.Notify then library:Notify("Đang có Danger/Stun! Đợi an toàn để bắt đầu Gate...") end
+                        while cs:HasTag(char, "Danger") or cs:HasTag(char, "Knocked") or cs:HasTag(char, "Unconscious") or char:FindFirstChild("Stun") do
+                            task.wait(0.5)
+                        end
+                        task.wait(1.5) -- Buffer cho an toàn tuyệt đối
+                    end
+
+                    if library and library.Notify then library:Notify("Đã tới Last Point & An toàn. Bắt đầu Psuedo Gate Shore 4...") end
 
                     -- --- PSUEDO GATE TO SHORE 4 ---
                     local shore_success = perform_gate("Shore 4")
@@ -9399,14 +9409,14 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         end
                     end
                     
-                    -- --- ĐỢI HẾT COMBAT CHẮC CHẮN ---
+                    -- --- ĐỢI HẾT COMBAT CHẮC CHẮN NẾU THẢ ĐỒ BỊ QUÁI ĐÁNH ---
                     task.wait(1.5)
                     if cs:HasTag(char, "Danger") then
                         if library and library.Notify then library:Notify("Đang trong Combat! Đợi an toàn để Gate về...") end
                         while cs:HasTag(char, "Danger") or char:FindFirstChild("Stun") or cs:HasTag(char, "Knocked") do
                             task.wait(1)
                         end
-                        task.wait(2) -- Trễ thêm 2s cho chắc chắn an toàn 100%
+                        task.wait(2)
                     end
 
                     -- --- LẤY ĐIỂM GATE ĐẦU TIÊN CỦA PATH VÀ GATE VỀ ---
@@ -9424,8 +9434,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     task.wait(1)
                     if was_bot_running and mem then
                         if library and library.Notify then library:Notify("Khởi động lại Bot ở Point 1!") end
-                        
-                        -- Ép memory về điểm 1, bot sẽ bay từ Gate lên điểm 1 và wait ở đó
                         mem:SetItem("current_point", "1")
                         mem:SetItem("botstarted", "true") 
                     end
