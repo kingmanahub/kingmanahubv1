@@ -9434,8 +9434,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 end)
             end)
             -- ///////////////////////////////////////////////////////
-        end
-
+			end		
         do
             local group_world = Tabs.World:AddLeftGroupbox("World Settings")
                 
