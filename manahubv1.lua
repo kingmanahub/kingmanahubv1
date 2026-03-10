@@ -552,7 +552,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             auto_ingredient = false,
             auto_weapon = false,
 			auto_phoenix_drop = false,            -- [ADD THIS LINE]
-            phoenix_return_gate = "Shore 4",     -- [ADD THIS LINE]
+            phoenix_return_gate = "Desert 1",     -- [ADD THIS LINE]
             auto_resurrection = false,
             auto_charge = false,
             auto_charge_threshold = 100,
