@@ -9114,28 +9114,96 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     end
                 end
             })
--- /// AUTO PHOENIX DOWN DROP & RETURN FEATURE (FIXED GATE & COMBAT WAIT) ///
+-- /// AUTO PHOENIX DOWN DROP & RETURN (PSUEDO CHATTED LOGIC) ///
             local dropped_phoenix_count = 0
             local is_phoenix_gating = false
 
-            -- Helper function to read the bot's path and find the last gate point
+            -- Hàm lấy Ping để tính Mana chuẩn xác
+            local function getPing()
+                local success, ping = pcall(function()
+                    return game:GetService('Stats'):WaitForChild('PerformanceStats'):WaitForChild('Ping'):GetValue()
+                end)
+                return success and ping or 0
+            end
+
+            -- Hàm Gate dùng PsuedoChatted (Chuẩn 100% logic script gốc)
+            local function perform_gate(location)
+                local char = plr.Character
+                if not char then return false end
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if not hum then return false end
+
+                local gate_spell = plr.Backpack:FindFirstChild("Gate") or char:FindFirstChild("Gate")
+                if not gate_spell then return false end
+
+                -- 1. Đợi hết cooldown / Danger
+                while cs:HasTag(char, "SnapCool") or cs:HasTag(char, "Danger") do
+                    task.wait(0.5)
+                end
+
+                -- 2. Equip Tool
+                if gate_spell.Parent == plr.Backpack then
+                    hum:EquipTool(gate_spell)
+                    task.wait(0.3)
+                end
+
+                -- 3. Sạc Mana (Ping Adjusted: 75-83)
+                local mana = char:FindFirstChild("Mana")
+                if mana then
+                    local ping_adjustment = getPing() / 1000
+                    local adjusted_target = math.clamp(79 - (ping_adjustment * 50), 75, 83)
+                    
+                    if mana.Value > 83 and utility.decharge_mana then
+                        utility:decharge_mana()
+                    end
+                    if mana.Value < adjusted_target and utility.charge_mana_until then
+                        utility:charge_mana_until(adjusted_target)
+                    end
+                end
+                task.wait(0.2)
+
+                -- 4. Right Click để Cast
+                if utility.RightClick then
+                    utility:RightClick()
+                end
+                task.wait(0.8)
+
+                -- 5. Bắn Remote PsuedoChatted (Gửi text điểm đến trực tiếp)
+                local pseudo = gate_spell:FindFirstChild("PsuedoChatted")
+                if pseudo then
+                    pseudo:FireServer(location)
+                else
+                    if library and library.Notify then library:Notify("Lỗi: Không tìm thấy PsuedoChatted!", 3) end
+                    return false
+                end
+
+                -- 6. Xác nhận dịch chuyển thành công (Đợi tag NoFall)
+                local wait_start = tick()
+                local success = false
+                while tick() - wait_start < 4 do
+                    if char:FindFirstChild("NoFall") then
+                        success = true
+                        break
+                    end
+                    task.wait(0.1)
+                end
+
+                task.wait(2) -- Đợi nhân vật load xong map mới
+                return success
+            end
+
+            -- Hàm đọc path để lấy Gate cũ
             local function get_latest_gate_point()
                 if not mem or not httt then return nil end
                 if not mem:HasItem("current_path") or not mem:HasItem("current_point") then return nil end
-                
-                local success, path_data = pcall(function()
-                    return httt:JSONDecode(mem:GetItem("current_path"))
-                end)
-                
+                local success, path_data = pcall(function() return httt:JSONDecode(mem:GetItem("current_path")) end)
                 local current_index = tonumber(mem:GetItem("current_point"))
-                
                 if success and type(path_data) == "table" and current_index then
                     for i = current_index, 1, -1 do
                         local node = path_data[i]
                         if type(node) == "table" then
                             local gate_val = node.Gate or node.GateName or node.gate or node.gatename
                             if type(gate_val) == "string" then return gate_val end
-                            
                             if type(node.Action) == "string" and string.find(node.Action:lower(), "gate") then
                                 local target = node.Target or node.Name or (node.Args and node.Args[1])
                                 if type(target) == "string" then return target end
@@ -9151,12 +9219,10 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             group_auto_pickup:AddToggle("auto_phoenix_drop", {
                 Text = "Auto Phoenix Drop (Max 5)",
                 Default = cheat_client.config.auto_phoenix_drop,
-                Tooltip = "Waits for path, Normal Gates Shore 4, drops PD, waits out combat, Gates back.",
+                Tooltip = "Đợi xong Path -> Psuedo Gate Shore 4 -> Drop -> Đợi hết Combat -> Psuedo Gate Về.",
                 Callback = function(value)
                     cheat_client.config.auto_phoenix_drop = value
-                    if not value then
-                        is_phoenix_gating = false
-                    end
+                    if not value then is_phoenix_gating = false end
                 end
             })
 
@@ -9165,7 +9231,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 Numeric = false,
                 Finished = false,
                 Text = "Return Gate Point",
-                Tooltip = "Fallback point to return to.",
+                Tooltip = "Điểm Gate dự phòng để quay về.",
                 Placeholder = "e.g. Desert 1",
                 Callback = function(value)
                     cheat_client.config.phoenix_return_gate = value
@@ -9176,36 +9242,26 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 Text = "Reset Phoenix Drop Count",
                 Func = function()
                     dropped_phoenix_count = 0
-                    if library and library.Notify then 
-                        library:Notify("Phoenix Drop count reset to 0.") 
-                    end
+                    if library and library.Notify then library:Notify("Reset đếm Phoenix Down về 0.") end
                     is_phoenix_gating = false
                 end
             })
 
             group_auto_pickup:AddButton({
                 Text = "DEMO: Force Gate & Drop PD",
-                Tooltip = "Instantly pauses bot, gates Shore 4, and drops PD.",
+                Tooltip = "Chạy thử: Tạm dừng bot -> Psuedo Gate Shore 4 -> Drop.",
                 Func = function()
                     if is_phoenix_gating then
-                        if library and library.Notify then library:Notify("Already gating, please wait!") end
+                        if library and library.Notify then library:Notify("Đang thực thi, vui lòng đợi!") end
                         return
                     end
                     
                     local char = plr.Character
                     if not char then return end
-                    local hum = char:FindFirstChildOfClass("Humanoid")
-                    if not hum then return end
                     
                     local phoenix = plr.Backpack:FindFirstChild("Phoenix Down") or char:FindFirstChild("Phoenix Down")
                     if not phoenix then 
-                        if library and library.Notify then library:Notify("Demo failed: No Phoenix Down!") end
-                        return 
-                    end
-
-                    local gate_spell = plr.Backpack:FindFirstChild("Gate") or char:FindFirstChild("Gate")
-                    if not gate_spell then 
-                        if library and library.Notify then library:Notify("Demo failed: No Gate spell!") end
+                        if library and library.Notify then library:Notify("Demo failed: Không có Phoenix Down!") end
                         return 
                     end
 
@@ -9214,89 +9270,40 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     task.spawn(function()
                         local was_bot_running = false
                         
+                        -- Dừng bot
                         if mem and mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true" then
                             was_bot_running = true
                             mem:SetItem("botstarted", "false") 
-                            task.wait(0.5) 
+                            task.wait(1) 
                             local hrp = char:FindFirstChild("HumanoidRootPart")
                             if hrp then hrp.Velocity = Vector3.new(0,0,0) end
                         end
 
-                        -- HELPER FUNCTION FOR NORMAL GATE (LEFT CLICK)
-                        local function perform_gate(location)
-                            if utility.charge_mana_until then utility:charge_mana_until(90) end
-                            task.wait(0.5)
-
-                            local current_gate = plr.Backpack:FindFirstChild("Gate") or char:FindFirstChild("Gate")
-                            if not current_gate then return false end
-
-                            hum:EquipTool(current_gate)
-                            task.wait(0.5)
-                            
-                            -- NORMAL GATE = LEFT CLICK (0 = Left Mouse Button in VIM)
-                            if vim then
-                                vim:SendMouseButtonEvent(0, 0, 0, true, game, 1) 
-                                task.wait(0.1)
-                                vim:SendMouseButtonEvent(0, 0, 0, false, game, 1) 
-                            else
-                                utility:LeftClick()
-                            end
-                            
-                            local gate_box = nil
-                            for i = 1, 20 do 
-                                task.wait(0.5)
-                                local playerGui = plr:FindFirstChild("PlayerGui")
-                                if playerGui then
-                                    for _, element in pairs(playerGui:GetDescendants()) do
-                                        if element:IsA("TextBox") and element.Name ~= "ChatBar" and element.Visible then
-                                            gate_box = element
-                                            break
-                                        end
-                                    end
-                                end
-                                if gate_box then break end
-                            end
-
-                            if gate_box then
-                                gate_box.Text = location
-                                task.wait(0.2)
-                                gate_box:CaptureFocus()
-                                task.wait(0.1)
-                                gate_box:ReleaseFocus(true)
-                                if vim then
-                                    vim:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-                                    task.wait(0.1)
-                                    vim:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-                                end
-                                task.wait(4.5) 
-                                return true
-                            else
-                                return false
-                            end
-                        end
-
-                        if library and library.Notify then library:Notify("DEMO: Charging mana & Gating to Shore 4...") end
+                        if library and library.Notify then library:Notify("DEMO: Bắn Remote Gate Shore 4...") end
 
                         local success = perform_gate("Shore 4")
                         if not success then
-                            if library and library.Notify then library:Notify("DEMO: Failed to find Gate UI!", 5) end
+                            if library and library.Notify then library:Notify("DEMO: Gate Shore 4 thất bại!", 5) end
                             is_phoenix_gating = false
                             if was_bot_running then mem:SetItem("botstarted", "true") end
                             return
                         end
                         
-                        -- Equip and Drop PD
+                        -- Drop PD
                         task.wait(1)
                         local current_phoenix = plr.Backpack:FindFirstChild("Phoenix Down") or char:FindFirstChild("Phoenix Down")
                         if current_phoenix then
-                            hum:EquipTool(current_phoenix)
-                            task.wait(0.5)
-                            if vim then
-                                vim:SendKeyEvent(true, Enum.KeyCode.Backspace, false, game)
-                                task.wait(0.1)
-                                vim:SendKeyEvent(false, Enum.KeyCode.Backspace, false, game)
+                            local hum = char:FindFirstChildOfClass("Humanoid")
+                            if hum then
+                                hum:EquipTool(current_phoenix)
+                                task.wait(0.5)
+                                if vim then
+                                    vim:SendKeyEvent(true, Enum.KeyCode.Backspace, false, game)
+                                    task.wait(0.1)
+                                    vim:SendKeyEvent(false, Enum.KeyCode.Backspace, false, game)
+                                end
+                                if library and library.Notify then library:Notify("DEMO: Đã thả Phoenix Down!") end
                             end
-                            if library and library.Notify then library:Notify("DEMO: Successfully dropped PD!") end
                         end
                         
                         task.wait(1.5)
@@ -9306,7 +9313,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 end
             })
 
-            -- Background Loop (Full Run)
+            -- Vòng Lặp Tự Động Chính
             utility:Connection(rs.Heartbeat, function()
                 if not (Toggles and Toggles.auto_phoenix_drop and Toggles.auto_phoenix_drop.Value) then return end
                 if is_phoenix_gating then return end
@@ -9336,10 +9343,9 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         was_bot_running = true
                         
                         if library and library.Notify then
-                            library:Notify("Phoenix Down found! Waiting to finish Path...")
+                            library:Notify("Phát hiện PD! Đang đợi xong Path...")
                         end
                         
-                        -- Wait until current_point hits the end of the path
                         while mem:GetItem("botstarted") == "true" do
                             local cur_pt = tonumber(mem:GetItem("current_point")) or 1
                             local success, path_data = pcall(function() return httt:JSONDecode(mem:GetItem("current_path") or "[]") end)
@@ -9358,70 +9364,17 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         if hrp then hrp.Velocity = Vector3.new(0,0,0) end
                     end
 
-                    -- Helper function for Normal Gate
-                    local function perform_gate(location)
-                        if utility.charge_mana_until then utility:charge_mana_until(90) end
-                        task.wait(0.5)
-
-                        local current_gate = plr.Backpack:FindFirstChild("Gate") or char:FindFirstChild("Gate")
-                        if not current_gate then return false end
-
-                        hum:EquipTool(current_gate)
-                        task.wait(0.5)
-                        
-                        -- NORMAL GATE = LEFT CLICK
-                        if vim then
-                            vim:SendMouseButtonEvent(0, 0, 0, true, game, 1) 
-                            task.wait(0.1)
-                            vim:SendMouseButtonEvent(0, 0, 0, false, game, 1) 
-                        else
-                            utility:LeftClick()
-                        end
-                        
-                        local gate_box = nil
-                        for i = 1, 20 do 
-                            task.wait(0.5)
-                            local playerGui = plr:FindFirstChild("PlayerGui")
-                            if playerGui then
-                                for _, element in pairs(playerGui:GetDescendants()) do
-                                    if element:IsA("TextBox") and element.Name ~= "ChatBar" and element.Visible then
-                                        gate_box = element
-                                        break
-                                    end
-                                end
-                            end
-                            if gate_box then break end
-                        end
-
-                        if gate_box then
-                            gate_box.Text = location
-                            task.wait(0.2)
-                            gate_box:CaptureFocus()
-                            task.wait(0.1)
-                            gate_box:ReleaseFocus(true)
-                            if vim then
-                                vim:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-                                task.wait(0.1)
-                                vim:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-                            end
-                            task.wait(4.5) 
-                            return true
-                        else
-                            return false
-                        end
-                    end
-
-                    if library and library.Notify then library:Notify("Gating to Shore 4...") end
+                    if library and library.Notify then library:Notify("Bắt đầu Remote Gate Shore 4...") end
 
                     local shore_success = perform_gate("Shore 4")
                     if not shore_success then
-                        if library and library.Notify then library:Notify("Error: Gate UI not found!", 5) end
+                        if library and library.Notify then library:Notify("Gate Shore 4 Lỗi / Backfire!", 5) end
                         is_phoenix_gating = false
                         if was_bot_running then mem:SetItem("botstarted", "true") end
                         return
                     end
 
-                    -- --- EQUIP & DROP PHOENIX DOWN ---
+                    -- Drop PD
                     task.wait(1)
                     local current_phoenix = plr.Backpack:FindFirstChild("Phoenix Down") or char:FindFirstChild("Phoenix Down")
                     if current_phoenix then
@@ -9436,39 +9389,35 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         
                         dropped_phoenix_count = dropped_phoenix_count + 1
                         if library and library.Notify then
-                            library:Notify("Dropped Phoenix Down! (" .. dropped_phoenix_count .. "/5)")
+                            library:Notify("Đã thả PD! (" .. dropped_phoenix_count .. "/5)")
                         end
                     end
+                    
+                    -- Đợi hết Danger (nếu thả PD xong bị quái cắn)
                     task.wait(1.5)
-
-                    -- --- WAIT OUT IN-COMBAT (DANGER TAG) ---
                     if cs:HasTag(char, "Danger") then
-                        if library and library.Notify then library:Notify("In-Combat detected. Waiting for safety...") end
-                        while cs:HasTag(char, "Danger") do
-                            task.wait(0.5)
+                        if library and library.Notify then library:Notify("Đang trong Combat! Đợi an toàn để Gate về...") end
+                        while cs:HasTag(char, "Danger") or char:FindFirstChild("Stun") or cs:HasTag(char, "Knocked") do
+                            task.wait(1)
                         end
-                        task.wait(1.5) -- Extra buffer to ensure combat is fully over
+                        task.wait(2) -- Buffer thêm 2s cho chắc chắn
                     end
 
-                    -- --- GATE BACK TO STARTING POINT ---
+                    -- Gate Về
                     local path_gate = get_latest_gate_point()
                     local target_location = path_gate or cheat_client.config.phoenix_return_gate or "Desert 1"
                     
-                    if library and library.Notify then library:Notify("Gating back to " .. target_location .. "...") end
+                    if library and library.Notify then library:Notify("An toàn. Đang Remote Gate về " .. target_location) end
                     
                     local return_success = perform_gate(target_location)
                     if not return_success then
-                        if library and library.Notify then
-                            library:Notify("Error: Return Gate UI not found!", 5)
-                        end
+                        if library and library.Notify then library:Notify("Lỗi khi Gate về!", 5) end
                     end
 
-                    -- --- RESUME BOT AT POINT 1 ---
+                    -- Resume Bot
                     task.wait(1)
                     if was_bot_running and mem then
-                        if library and library.Notify then
-                            library:Notify("Resuming bot at Point 1...")
-                        end
+                        if library and library.Notify then library:Notify("Khởi động lại Bot ở Point 1!") end
                         mem:SetItem("current_point", "1")
                         mem:SetItem("botstarted", "true") 
                     end
