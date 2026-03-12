@@ -551,8 +551,10 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             auto_trinket = false,
             auto_ingredient = false,
             auto_weapon = false,
-			auto_phoenix_drop = false,            -- [ADD THIS LINE]
-            phoenix_return_gate = "Desert 1",     -- [ADD THIS LINE]
+            auto_phoenix_drop = false,
+            phoenix_drop_count = 0,
+            phoenix_drop_max = 5,
+            phoenix_return_gate = "Desert 1",
             auto_resurrection = false,
             auto_charge = false,
             auto_charge_threshold = 100,
@@ -16157,6 +16159,166 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     library:Notify("Bot stopped")
                     return
                 end
+    -- ═══════════════════════════════════════════════
+                -- AUTO PHOENIX DROP: chạy sau khi path kết thúc
+                -- ═══════════════════════════════════════════════
+                local function run_phoenix_drop_routine()
+                    -- Kiểm tra toggle bật và còn slot
+                    if not (Toggles.AutoPhoenixDrop and Toggles.AutoPhoenixDrop.Value) then return end
+                    if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then return end
+ 
+                    -- Kiểm tra Phoenix Down trong backpack
+                    local phoenix = FindFirstChild(plr.Backpack, "Phoenix Down")
+                        or (plr.Character and FindFirstChild(plr.Character, "Phoenix Down"))
+                    if not phoenix then
+                        library:Notify("[PD] Không tìm thấy Phoenix Down, bỏ qua")
+                        return
+                    end
+ 
+                    -- Kiểm tra giới hạn tối đa
+                    local current_count = cheat_client.config.phoenix_drop_count or 0
+                    local max_drops = Options.PhoenixDropMax and Options.PhoenixDropMax.Value or 5
+                    if current_count >= max_drops then
+                        library:Notify(string.format("[PD] Đã đủ %d/%d lần thả, bỏ qua vòng này", current_count, max_drops))
+                        return
+                    end
+ 
+                    library:Notify("[PD] Bắt đầu thả Phoenix Down...")
+ 
+                    -- Tạm dừng bot (set path_running = false để tránh can thiệp)
+                    trinket_bot.path_running = false
+                    task.wait(0.3)
+ 
+                    -- Đọc gate quay về từ UI hoặc config
+                    local return_gate = (Options.PhoenixReturnGate and Options.PhoenixReturnGate.Value ~= "")
+                        and Options.PhoenixReturnGate.Value
+                        or cheat_client.config.phoenix_return_gate
+                        or "Desert 1"
+ 
+                    -- Đọc gate ra đảo (Shore 4 cố định)
+                    local drop_gate = "Shore 4"
+ 
+                    -- Tạm thời bật path_running để Gate() hoạt động
+                    trinket_bot.path_running = true
+ 
+                    -- BƯỚC 1: Gate ra Shore 4
+                    library:Notify("[PD] Gating ra Shore 4...")
+                    local gate_ok = Gate(drop_gate)
+                    if not gate_ok then
+                        library:Notify("[PD] Gate ra Shore 4 thất bại, hủy")
+                        trinket_bot.path_running = false
+                        return
+                    end
+ 
+                    task.wait(1.2)
+ 
+                    -- BƯỚC 2: Equip và Drop Phoenix Down
+                    library:Notify("[PD] Đang thả Phoenix Down...")
+                    local char = plr.Character
+                    if not char then
+                        library:Notify("[PD] Không có character, hủy")
+                        trinket_bot.path_running = false
+                        return
+                    end
+ 
+                    -- Tìm lại sau khi gate
+                    local pd_tool = FindFirstChild(plr.Backpack, "Phoenix Down")
+                        or FindFirstChild(char, "Phoenix Down")
+ 
+                    if not pd_tool then
+                        library:Notify("[PD] Mất Phoenix Down sau gate, hủy")
+                        trinket_bot.path_running = false
+                        return
+                    end
+ 
+                    -- Equip nếu còn trong backpack
+                    if FindFirstChild(plr.Backpack, "Phoenix Down") then
+                        char.Humanoid:EquipTool(plr.Backpack["Phoenix Down"])
+                        task.wait(0.3)
+                    end
+ 
+                    -- Drop: tìm Drop remote hoặc dùng Humanoid:UnequipTools + destroy
+                    local equipped_pd = FindFirstChild(char, "Phoenix Down")
+                    if equipped_pd then
+                        local drop_remote = FindFirstChild(equipped_pd, "DropTool")
+                            or FindFirstChild(equipped_pd, "Drop")
+                            or FindFirstChild(equipped_pd, "RemoteEvent")
+ 
+                        if drop_remote and drop_remote:IsA("RemoteEvent") then
+                            -- Thử fire Drop remote nếu có
+                            pcall(function()
+                                drop_remote:FireServer()
+                            end)
+                            task.wait(0.2)
+                        end
+ 
+                        -- Fallback: unequip rồi destroy (loot drop chuẩn của RL)
+                        if FindFirstChild(char, "Phoenix Down") then
+                            char.Humanoid:UnequipTools()
+                            task.wait(0.2)
+                            local pd_in_backpack = FindFirstChild(plr.Backpack, "Phoenix Down")
+                            if pd_in_backpack then
+                                pd_in_backpack.Parent = ws.Thrown
+                                task.wait(0.1)
+                            end
+                        end
+                    end
+ 
+                    library:Notify("[PD] Đã thả xong. Chờ combat clear...")
+ 
+                    -- BƯỚC 3: Anti-Combat wait (Danger / Stun / Knocked)
+                    local timeout_max = 30
+                    local timeout_elapsed = 0
+                    while timeout_elapsed < timeout_max do
+                        local c = plr.Character
+                        if not c then break end
+                        local has_danger  = cs:HasTag(c, "Danger")
+                        local has_stun    = FindFirstChild(c, "Stun") ~= nil
+                        local has_knocked = cs:HasTag(c, "Knocked")
+                        if not has_danger and not has_stun and not has_knocked then
+                            break
+                        end
+                        task.wait(0.5)
+                        timeout_elapsed = timeout_elapsed + 0.5
+                    end
+ 
+                    library:Notify("[PD] Combat clear. Quay về " .. return_gate .. "...")
+                    task.wait(0.4)
+ 
+                    -- BƯỚC 4: Gate quay về điểm bắt đầu
+                    local back_ok = Gate(return_gate)
+                    if not back_ok then
+                        library:Notify("[PD] Gate quay về thất bại, thử lại sau 2s...")
+                        task.wait(2)
+                        Gate(return_gate)
+                    end
+ 
+                    task.wait(1.5)
+ 
+                    -- BƯỚC 5: Cập nhật counter và resume
+                    cheat_client.config.phoenix_drop_count = (cheat_client.config.phoenix_drop_count or 0) + 1
+                    local new_count = cheat_client.config.phoenix_drop_count
+                    library:Notify(string.format("[PD] Hoàn tất! (%d/%d lần). Tiếp tục farm...", new_count, max_drops))
+ 
+                    -- Cập nhật label counter nếu có
+                    if Labels.PhoenixDropCount then
+                        Labels.PhoenixDropCount:SetText(string.format("Đã thả: %d/%d", new_count, max_drops))
+                    end
+ 
+                    -- Reset path_running để loop sau tiếp tục
+                    trinket_bot.path_running = false
+                end
+ 
+                -- Chạy routine trước khi quyết định serverhop/restart
+                if not test_mode then
+                    local ok, err_pd = pcall(run_phoenix_drop_routine)
+                    if not ok then
+                        warn("[PD] Lỗi trong phoenix drop routine:", err_pd)
+                    end
+                end
+                -- ═══════════════════════════════════════════════
+                -- END AUTO PHOENIX DROP
+                -- ═══════════════════════════════════════════════
 
                 if not test_mode then
                     local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
@@ -16793,6 +16955,133 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 Default = false
             })
 
+  group_trinket_bot:AddDivider()
+ 
+            group_trinket_bot:AddLabel("── Auto Hide Phoenix Down ──")
+ 
+            group_trinket_bot:AddToggle("AutoPhoenixDrop", {
+                Text = "Auto Hide Phoenix Down",
+                Default = false,
+                Tooltip = "Tự động gate ra Shore 4 thả Phoenix Down sau mỗi path, rồi quay về điểm đầu",
+                Callback = function(value)
+                    cheat_client.config.auto_phoenix_drop = value
+                    if value then
+                        library:Notify("[PD] Auto Hide Phoenix Down: BẬT")
+                    else
+                        library:Notify("[PD] Auto Hide Phoenix Down: TẮT")
+                    end
+                end
+            })
+ 
+            group_trinket_bot:AddInput("PhoenixReturnGate", {
+                Default = "Desert 1",
+                Numeric = false,
+                Finished = false,
+                Text = "Return Gate (sau khi thả)",
+                Tooltip = "Gate quay về sau khi thả xong (ví dụ: Desert 1)",
+                Placeholder = "Desert 1"
+            })
+ 
+            group_trinket_bot:AddSlider("PhoenixDropMax", {
+                Text = "Giới hạn thả (lần)",
+                Default = 5,
+                Min = 1,
+                Max = 20,
+                Rounding = 0,
+                Compact = true,
+                Tooltip = "Tối đa bao nhiêu lần thả trước khi tắt tự động"
+            })
+ 
+            group_trinket_bot:AddLabel("PhoenixDropCount", {
+                Text = string.format("Đã thả: %d/%d",
+                    cheat_client.config.phoenix_drop_count or 0,
+                    5
+                ),
+                DoesWrap = false
+            })
+ 
+            group_trinket_bot:AddButton({
+                Text = "Reset Bộ Đếm",
+                Func = function()
+                    cheat_client.config.phoenix_drop_count = 0
+                    if Labels.PhoenixDropCount then
+                        Labels.PhoenixDropCount:SetText("Đã thả: 0/" .. (Options.PhoenixDropMax and Options.PhoenixDropMax.Value or 5))
+                    end
+                    library:Notify("[PD] Reset bộ đếm về 0")
+                end
+            })
+ 
+            group_trinket_bot:AddButton({
+                Text = "DEMO: Test thả ngay",
+                Tooltip = "Chạy thử kịch bản thả Phoenix Down ngay lập tức (không cần bot chạy)",
+                Func = function()
+                    task.spawn(function()
+                        library:Notify("[PD DEMO] Bắt đầu test...")
+ 
+                        local phoenix = FindFirstChild(plr.Backpack, "Phoenix Down")
+                            or (plr.Character and FindFirstChild(plr.Character, "Phoenix Down"))
+                        if not phoenix then
+                            library:Notify("[PD DEMO] Không có Phoenix Down trong người!")
+                            return
+                        end
+ 
+                        local return_gate = (Options.PhoenixReturnGate and Options.PhoenixReturnGate.Value ~= "")
+                            and Options.PhoenixReturnGate.Value or "Desert 1"
+ 
+                        -- Bật tạm path_running để Gate() không bị block
+                        local was_running = trinket_bot.path_running
+                        trinket_bot.path_running = true
+ 
+                        library:Notify("[PD DEMO] Gating ra Shore 4...")
+                        local ok = Gate("Shore 4")
+                        if not ok then
+                            library:Notify("[PD DEMO] Gate thất bại!")
+                            trinket_bot.path_running = was_running
+                            return
+                        end
+ 
+                        task.wait(1.2)
+ 
+                        local char = plr.Character
+                        local pd_tool = char and (FindFirstChild(plr.Backpack, "Phoenix Down")
+                            or FindFirstChild(char, "Phoenix Down"))
+ 
+                        if pd_tool then
+                            if FindFirstChild(plr.Backpack, "Phoenix Down") then
+                                char.Humanoid:EquipTool(plr.Backpack["Phoenix Down"])
+                                task.wait(0.3)
+                            end
+                            char.Humanoid:UnequipTools()
+                            task.wait(0.2)
+                            local pd_bp = FindFirstChild(plr.Backpack, "Phoenix Down")
+                            if pd_bp then
+                                pd_bp.Parent = workspace.Thrown
+                            end
+                            library:Notify("[PD DEMO] Đã thả! Chờ combat clear...")
+                        else
+                            library:Notify("[PD DEMO] Không tìm thấy PD sau gate")
+                        end
+ 
+                        -- Wait combat
+                        local t = 0
+                        while t < 30 do
+                            local c = plr.Character
+                            if not c then break end
+                            if not cs:HasTag(c, "Danger") and not FindFirstChild(c, "Stun") and not cs:HasTag(c, "Knocked") then break end
+                            task.wait(0.5); t = t + 0.5
+                        end
+ 
+                        library:Notify("[PD DEMO] Gate quay về " .. return_gate)
+                        Gate(return_gate)
+ 
+                        task.wait(1.5)
+                        trinket_bot.path_running = was_running
+                        library:Notify("[PD DEMO] DEMO hoàn tất!")
+                    end)
+                end
+            })
+]]
+ 
             group_trinket_bot:AddDivider()
 
             group_trinket_bot:AddToggle("KickOnTrinket", {
