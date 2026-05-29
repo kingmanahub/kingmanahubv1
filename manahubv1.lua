@@ -16900,7 +16900,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     "Amulet of the White King",
                     "Phoenix Down",
                     "Scroll of Trahere",
-                    "Scroll of Telorum"
+                    "Scroll of Telorum",
                     "Scroll of Sraunus"
                 },
                 Multi = true,
