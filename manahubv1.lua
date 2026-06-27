@@ -13105,6 +13105,27 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 return false
             end
 
+			local function has_spec_skill(player)
+    if not player then
+        return false
+    end
+
+    local function scan(container)
+        if not container then
+            return nil
+        end
+
+        for _, tool in ipairs(container:GetChildren()) do
+            if tool:IsA("Tool") and table.find(cheat_client.spec_skills, tool.Name) then
+                return tool.Name
+            end
+        end
+    end
+
+    return scan(player.Character)
+        or scan(player:FindFirstChild("Backpack"))
+end
+
             local teleport_debounce = false
             local function TrinketBotServerhop(reason, skip_test_mode_check)
                 if not skip_test_mode_check and trinket_bot.test_mode then
@@ -13850,6 +13871,43 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         handle_moderator_detection(player)
                     end
                 end))
+				local spec_connection = track_connection(
+    "spec_skill",
+    utility:Connection(plrs.PlayerAdded,function(player)
+
+        if player == plr then
+            return
+        end
+
+        task.spawn(function()
+
+            player.CharacterAdded:Wait()
+			task.wait(0.5)
+
+            if Toggles.DetectSpecSkills
+            and Toggles.DetectSpecSkills.Value then
+
+                local skill = has_spec_skill(player)
+
+                if skill then
+
+                    library:Notify(
+                        player.Name.." joined with "..skill
+                    )
+
+                    TrinketBotServerhop(
+                        player.Name.." joined with "..skill
+                    )
+
+                    return
+                end
+
+            end
+
+        end)
+
+    end)
+)
 
                 local glassmask_connection, glassmask_thrown_connection
                 local fimbul_escape_in_progress = false
@@ -16825,6 +16883,12 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 Compact = true
             })
 
+			group_trinket_bot:AddToggle("DetectSpecSkills", {
+ 		 	Text = "Detect Spec Skills",
+   			Default = true,
+    		Tooltip = "Instantly serverhop if another player owns any detected spec skill."
+			})
+
             group_trinket_bot:AddToggle("DisableGPURendering", {
                 Text = "Disable GPU Rendering",
                 Default = false,
@@ -17135,6 +17199,34 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         end
                     end
 
+	if Toggles.DetectSpecSkills and Toggles.DetectSpecSkills.Value then
+    for _, other_player in next, plrs:GetPlayers() do
+        if other_player ~= plr then
+
+            local skill = has_spec_skill(other_player)
+
+            if skill then
+                library:Notify(
+                    string.format(
+                        "%s has %s - Serverhopping.",
+                        other_player.Name,
+                        skill
+                    )
+                )
+
+                TrinketBotServerhop(
+                    string.format(
+                        "%s has spec skill %s",
+                        other_player.Name,
+                        skill
+                    )
+                )
+
+                return
+            end
+        end
+    end
+end
                     if should_skip_illusionist then
                         for _, other_player in next, plrs:GetPlayers() do
                             if other_player ~= plr and has_observe(other_player) then
