@@ -17190,14 +17190,27 @@ end
                         end
                     end
 
-                    for _, other_player in next, plrs:GetPlayers() do
-                        if other_player ~= plr and is_moderator(other_player) then
-                            library:Notify("Moderator in server! Serverhopping...")
-                            task.wait(0.5)
-                            TrinketBotServerhop(string.format("MODERATOR IN SERVER; %s - Serverhopping before spawn", other_player.Name))
-                            return
-                        end
-                    end
+                   for _, other_player in next, plrs:GetPlayers() do
+    if other_player ~= plr and is_moderator(other_player) then
+        library:Notify(
+            string.format(
+                "Moderator %s detected! Waiting 10 seconds before serverhop...",
+                other_player.Name
+            )
+        )
+
+        task.wait(10)
+
+        TrinketBotServerhop(
+            string.format(
+                "MODERATOR IN SERVER; %s - Delayed serverhop after 10s",
+                other_player.Name
+            )
+        )
+
+        return
+    end
+end
 
 	if Toggles.DetectSpecSkills and Toggles.DetectSpecSkills.Value then
     for _, other_player in next, plrs:GetPlayers() do
