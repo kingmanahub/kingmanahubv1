@@ -13714,6 +13714,7 @@ end
                 end
 
                 trinket_bot.path_running = true
+                trinket_bot.moderator_detected = false
 
                 if not plr.Character or not FindFirstChild(plr.Character, "HumanoidRootPart") then
                     trinket_bot.path_running = false
