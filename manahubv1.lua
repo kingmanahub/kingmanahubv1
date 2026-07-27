@@ -12050,7 +12050,8 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 session_start_time = 0,
                 moderator_detected = false,
                 pending_artifact_logs = {},
-                pending_pickup_ids = {}
+                pending_pickup_ids = {},
+                expected_teleport_until = 0
             }
 
             cheat_client.trinket_bot = trinket_bot
@@ -12470,6 +12471,9 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
 
                 local current_position = root.Position
                 local distance = (targetPosition - current_position).Magnitude
+
+                trinket_bot.expected_teleport_until = tick() + math.max(1.5, (distance / (Options.TrinketBotSpeed and Options.TrinketBotSpeed.Value or 100)) + 1)
+
                 if distance > 1500 then
                     library:Notify(string.format("!! Attempted teleport of %.0f studs! Stopping path... (if this is a bug DM work at a pizza place bot)", distance))
                     trinket_bot.path_running = false
@@ -12838,6 +12842,8 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 utility:RightClick()
                 task.wait(0.8)
 
+                trinket_bot.expected_teleport_until = tick() + 6
+
                 if FindFirstChild(gateTool, "PsuedoChatted") then
                     gateTool.PsuedoChatted:FireServer(where)
                 end
@@ -13168,6 +13174,7 @@ end
                 local httpService = Services.HttpService
                 local settings_to_save = {
                     skip_illusionist = Toggles.SkipIllusionist and Toggles.SkipIllusionist.Value or false,
+                    kick_on_rubberband = Toggles.KickOnRubberband and Toggles.KickOnRubberband.Value or false,
                     pickup_scrolls = Toggles.PickupScrolls and Toggles.PickupScrolls.Value or false,
                     pickup_ice_essence = Toggles.PickupIceEssence and Toggles.PickupIceEssence.Value or false,
                     pickup_mythics_artifacts = Options.PickupMythicsArtifacts and Options.PickupMythicsArtifacts.Value or {},
@@ -14237,6 +14244,52 @@ end
                         table.insert(gnav_connections, char_conn)
                     end)
                     table.insert(gnav_connections, player_added_conn)
+                end
+
+                do
+                    local SUDDEN_TELEPORT_DISTANCE = 200
+                    local last_known_position = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") and plr.Character.HumanoidRootPart.Position
+                    local teleport_kick_triggered = false
+
+                    track_connection("sudden_teleport_watch", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
+                        if not (Toggles and Toggles.KickOnRubberband and Toggles.KickOnRubberband.Value) then
+                            last_known_position = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") and plr.Character.HumanoidRootPart.Position
+                            return
+                        end
+
+                        if teleport_kick_triggered or not trinket_bot.path_running then return end
+
+                        local character = plr.Character
+                        local hrp = character and FindFirstChild(character, "HumanoidRootPart")
+                        if not hrp then
+                            last_known_position = nil
+                            return
+                        end
+
+                        local current_position = hrp.Position
+
+                        if last_known_position then
+                            local jump_distance = (current_position - last_known_position).Magnitude
+                            local within_expected_window = tick() < (trinket_bot.expected_teleport_until or 0)
+
+                            if jump_distance > SUDDEN_TELEPORT_DISTANCE and not within_expected_window then
+                                teleport_kick_triggered = true
+                                trinket_bot.path_running = false
+
+                                local message = string.format("Rubberband/sudden teleport detected (%.0f studs) - path conflict, kicking (Kick on Rubberband enabled)", jump_distance)
+                                library:Notify(message)
+                                if utility then
+                                    utility:plain_webhook(string.format("@here %s", message))
+                                end
+
+                                task.wait(0.5)
+                                plr:Kick(message)
+                                return
+                            end
+                        end
+
+                        last_known_position = current_position
+                    end)))
                 end
 
                 proximity_connection = track_connection("proximity", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
@@ -16590,6 +16643,12 @@ end
                 Text = "Skip Illusionist Servers",
                 Default = false
             })
+
+            group_trinket_bot:AddToggle("KickOnRubberband", {
+                Text = "Kick on Rubberband",
+                Default = false,
+                Tooltip = "If the character suddenly snaps to a previous position (server rubberband/lag) during botting, kick immediately instead of continuing"
+            })
 -- /// AUTO PHOENIX DOWN DROP & RETURN (TRINKET BOT INTEGRATION) ///
             local dropped_phoenix_count = 0
             local is_phoenix_gating = false
@@ -17053,6 +17112,7 @@ end
             local function apply_settings(settings)
                 if not settings then return end
                 if Toggles.SkipIllusionist then Toggles.SkipIllusionist:SetValue(settings.skip_illusionist or false) end
+                if Toggles.KickOnRubberband then Toggles.KickOnRubberband:SetValue(settings.kick_on_rubberband or false) end
                 if Toggles.PickupScrolls then Toggles.PickupScrolls:SetValue(settings.pickup_scrolls or false) end
                 if Toggles.PickupIceEssence then Toggles.PickupIceEssence:SetValue(settings.pickup_ice_essence or false) end
                 if Options.PickupMythicsArtifacts then
@@ -18040,6 +18100,7 @@ end
                         points = serialized_points,
                         settings = {
                             skip_illusionist = Toggles.SkipIllusionist and Toggles.SkipIllusionist.Value or false,
+                            kick_on_rubberband = Toggles.KickOnRubberband and Toggles.KickOnRubberband.Value or false,
                             pickup_scrolls = Toggles.PickupScrolls and Toggles.PickupScrolls.Value or false,
                             pickup_ice_essence = Toggles.PickupIceEssence and Toggles.PickupIceEssence.Value or false,
                             pickup_mythics_artifacts = Options.PickupMythicsArtifacts and Options.PickupMythicsArtifacts.Value or {},
