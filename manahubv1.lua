@@ -3037,15 +3037,9 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             warn("[SERVERHOP FALLBACK] No non-full servers available at all")
                         end
 
-                        utility:plain_webhook("SERVERHOP FAILED: All servers full or unavailable after 24 attempts. Retrying in 10 seconds...")
-                        task.wait(10)
-                        
-                        task.spawn(function()
-                            if utility and utility.Serverhop then
-                                utility:Serverhop()
-                            end
-                        end)
-                        return false
+                        utility:plain_webhook("@here SERVERHOP FAILED: All servers full or unavailable after 24 attempts. Kicking bot. if this happens dm zyu")
+                        task.wait(0.5)
+                        plr:Kick("Serverhop failed, dm zyu if this occurs [1]")
                     else
                         warn("[!] No servers found in ServerInfo, using fallback")
                         if blockTarget then
@@ -6944,25 +6938,32 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         utility:Serverhop()
                     end
 
-                   local function handle_dayfarm_moderator(moderator_player)
+                    local function handle_dayfarm_moderator(moderator_player)
                         if not moderator_player then return end
 
                         local mod_name = moderator_player.Name
-                        local msg = string.format("MODERATOR %s DETECTED - STOPPING BOT, HOPPING IN 5S", mod_name)
-                        
-                        if library and library.Notify then library:Notify("!! " .. msg .. " !!") end
-                        if utility then utility:plain_webhook(msg) end
-                        
-                        if library and library.Toggles and library.Toggles.day_farm then
-                            library.Toggles.day_farm:SetValue(false)
-                        else
-                            cheat_client:day_farm(false)
+                        local mem_key = "dayfarm_mod_encounter_" .. mod_name
+
+                        local encounter_count = 1
+                        if mem:HasItem(mem_key) then
+                            encounter_count = tonumber(mem:GetItem(mem_key)) or 1
+                            encounter_count = encounter_count + 1
                         end
-                        
-                        task.wait(5)
-                        
-                        if utility and utility.Serverhop then
-                            utility:Serverhop()
+
+                        mem:SetItem(mem_key, tostring(encounter_count))
+
+                        if encounter_count >= 2 then
+                            library:Notify(string.format("!! MODERATOR %s ENCOUNTERED %d TIMES - KICKING !!", mod_name, encounter_count))
+
+                            if utility then
+                                utility:plain_webhook(string.format("@everyone Encountered moderator %s again after serverhop, kicking", mod_name))
+                            end
+
+                            task.wait(0.5)
+                            plr:Kick(string.format("Moderator %s encountered %d times during day farm", mod_name, encounter_count))
+                        else
+                            library:Notify(string.format("!! MODERATOR %s DETECTED (encounter %d/2) - SERVERHOPPING !!", mod_name, encounter_count))
+                            DayfarmServerhop(string.format("Moderator %s detected (encounter %d/2)", mod_name, encounter_count))
                         end
                     end
 
@@ -7224,23 +7225,27 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 if mem:HasItem("dayfarming") and mem:GetItem("dayfarming") == "true" then
                     task.wait(2)
 
-                   for _, player in next, plrs:GetPlayers() do
+                    for _, player in next, plrs:GetPlayers() do
                         if player ~= plr and is_moderator(player) then
                             local mod_name = player.Name
-                            local msg = string.format("Moderator %s detected on auto-restart - stopping bot & hopping in 5s", mod_name)
-                            
-                            if library and library.Notify then library:Notify("!! " .. msg .. " !!") end
-                            if utility then utility:plain_webhook(msg) end
-                            
-                            if library and library.Toggles and library.Toggles.day_farm then
-                                library.Toggles.day_farm:SetValue(false)
-                            else
-                                cheat_client:day_farm(false)
+                            local mem_key = "dayfarm_mod_encounter_" .. mod_name
+
+                            local encounter_count = 1
+                            if mem:HasItem(mem_key) then
+                                encounter_count = tonumber(mem:GetItem(mem_key)) or 1
+                                encounter_count = encounter_count + 1
                             end
-                            
-                            task.wait(5)
-                            
-                            if utility and utility.Serverhop then
+
+                            mem:SetItem(mem_key, tostring(encounter_count))
+
+                            if encounter_count >= 2 then
+                                library:Notify(string.format("!! MODERATOR %s ENCOUNTERED %d TIMES - KICKING !!", mod_name, encounter_count))
+                                utility:plain_webhook(string.format("@everyone Encountered moderator %s again after serverhop during auto-restart, kicking", mod_name))
+                                task.wait(0.5)
+                                plr:Kick(string.format("Moderator %s encountered %d times during day farm auto-restart", mod_name, encounter_count))
+                            else
+                                library:Notify(string.format("!! MODERATOR %s DETECTED (encounter %d/2) - SERVERHOPPING !!", mod_name, encounter_count))
+                                utility:plain_webhook(string.format("Moderator %s detected on dayfarm auto-restart (encounter %d/2) - serverhopping", mod_name, encounter_count))
                                 utility:Serverhop()
                             end
                             return
@@ -13688,29 +13693,15 @@ end
 
                 if cheat_client and cheat_client.config and not cheat_client.config.blatant_mode and serverhop_count < 1 then
                     library:Notify("Blatant Mode must be enabled to run paths!")
-                    for _, player in next, plrs:GetPlayers() do
-                        if player ~= plr and is_moderator(player) then
-                            local mod_name = player.Name
-                            local msg = string.format("Moderator %s detected on trinket auto-restart - stopping & hopping in 5s", mod_name)
-                            
-                            if library and library.Notify then library:Notify("!! " .. msg .. " !!") end
-                            if utility then utility:plain_webhook(msg) end
-                            
-                            -- Tắt trinket bot
-                            if library and library.Toggles and library.Toggles.auto_trinket then
-                                library.Toggles.auto_trinket:SetValue(false)
-                            else
-                                if cheat_client.auto_trinket then cheat_client:auto_trinket(false) end
-                            end
-                            
-                            task.wait(5)
-                            
-                            if utility and utility.Serverhop then
-                                utility:Serverhop()
-                            end
-                            return
+                    if mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true" then
+                        if utility and utility.plain_webhook then
+                            utility:plain_webhook("failed to start: blatant mode not enabled - Kicking (dm the bot if this is an error)")
                         end
+                        task.wait(1)
+                        plr:Kick("Bot failed to start: Blatant Mode not enabled")
                     end
+                    return
+                end
 
                 if #trinket_bot.path_points == 0 then
                     library:Notify("No points in path!")
