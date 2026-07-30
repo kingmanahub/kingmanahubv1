@@ -20029,14 +20029,14 @@ end
             })
 
             group_ui:AddDropdown("auto_panic_options", {
-                Text = "Panic Conditions",
-                Values = {"Unload on mod join", "Unload on Illusionist join"},
-                Default = 1,
-                Multi = true,
-                Callback = function(value)
-                    cheat_client.config.auto_panic_options = value
-                end
-            })
+    Text = "Panic Conditions",
+    Values = {"Kick on mod join", "Kick on Illusionist join"}, -- Đã đổi tên ở đây
+    Default = 1,
+    Multi = true,
+    Callback = function(value)
+        cheat_client.config.auto_panic_options = value
+    end
+})
 
             group_ui:AddDivider()
             group_ui:AddLabel("Webhook Notifications")
