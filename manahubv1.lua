@@ -20029,14 +20029,14 @@ end
             })
 
             group_ui:AddDropdown("auto_panic_options", {
-    Text = "Panic Conditions",
-    Values = {"Kick on mod join", "Kick on Illusionist join"}, -- Đã đổi tên ở đây
-    Default = 1,
-    Multi = true,
-    Callback = function(value)
-        cheat_client.config.auto_panic_options = value
-    end
-})
+                Text = "Panic Conditions",
+                Values = {"Unload on mod join", "Unload on Illusionist join"},
+                Default = 1,
+                Multi = true,
+                Callback = function(value)
+                    cheat_client.config.auto_panic_options = value
+                end
+            })
 
             group_ui:AddDivider()
             group_ui:AddLabel("Webhook Notifications")
@@ -24377,21 +24377,17 @@ end
             end
 
             utility:Connection(plrs.PlayerAdded, function(player)
-    if is_moderator_check(player) then
-        if Toggles and Toggles.auto_panic and Toggles.auto_panic.Value and
-           Options and Options.auto_panic_options and Options.auto_panic_options.Value and
-           Options.auto_panic_options.Value["Kick on mod join"] then -- Đổi tên điều kiện cho khớp với Menu UI
-           
-            -- Sửa lại tin nhắn gửi về webhook cho đúng ngữ cảnh
-            utility:plain_webhook(string.format("**AUTO PANIC** Kicking because a moderator joined - %s (%s)", player.Name, player.UserId))
-            
-            task.wait(0.05)
-            
-            -- Thay thế hàm Unload() bằng lệnh Kick
-            plr:Kick("Auto Panic: Văng game do có Moderator tham gia!")
+                if is_moderator_check(player) then
+                    if Toggles and Toggles.auto_panic and Toggles.auto_panic.Value and
+                       Options and Options.auto_panic_options and Options.auto_panic_options.Value and
+                       Options.auto_panic_options.Value["Unload on mod join"] then
+                        utility:plain_webhook(string.format("**AUTO PANIC** Unloading because a moderator joined - %s (%s)", player.Name, player.UserId))
+                        task.wait(0.05)
+                        utility:Unload()
+                    end
+                end
+            end)
         end
-    end
-end)
 
         do
             local detected_illusionists = {}
