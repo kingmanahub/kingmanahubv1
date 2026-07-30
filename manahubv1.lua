@@ -24376,20 +24376,18 @@ end
                 return false
             end
 
-           utility:Connection(plrs.PlayerAdded, function(player)
-    if is_moderator_check(player) then
-        if Toggles and Toggles.auto_panic and Toggles.auto_panic.Value and
-           Options and Options.auto_panic_options and Options.auto_panic_options.Value and
-           Options.auto_panic_options.Value["Unload on mod join"] then
-           
-           utility:plain_webhook(string.format("**AUTO PANIC** Kicking because a moderator joined - %s (%s)", player.Name, player.UserId))
-           task.wait(0.05)
-           
-           -- Thay thế utility:Unload() bằng hàm Kick
-           plr:Kick("Auto Panic: A moderator joined the game.") 
+            utility:Connection(plrs.PlayerAdded, function(player)
+                if is_moderator_check(player) then
+                    if Toggles and Toggles.auto_panic and Toggles.auto_panic.Value and
+                       Options and Options.auto_panic_options and Options.auto_panic_options.Value and
+                       Options.auto_panic_options.Value["Unload on mod join"] then
+                        utility:plain_webhook(string.format("**AUTO PANIC** Unloading because a moderator joined - %s (%s)", player.Name, player.UserId))
+                        task.wait(0.05)
+                        utility:Unload()
+                    end
+                end
+            end)
         end
-    end
-end)
 
         do
             local detected_illusionists = {}
