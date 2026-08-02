@@ -3037,9 +3037,10 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             warn("[SERVERHOP FALLBACK] No non-full servers available at all")
                         end
 
-                        utility:plain_webhook("@here SERVERHOP FAILED: All servers full or unavailable after 24 attempts. Kicking bot. if this happens dm zyu")
-                        task.wait(0.5)
-                        plr:Kick("Serverhop failed, dm zyu if this occurs [1]")
+                        utility:plain_webhook("@here SERVERHOP FAILED: All servers full or unavailable after 24 attempts. Retrying in 10s...")
+                        warn("[SERVERHOP] All attempts failed - waiting 10s then retrying...")
+                        task.wait(10)
+                        return utility:Serverhop()
                     else
                         warn("[!] No servers found in ServerInfo, using fallback")
                         if blockTarget then
@@ -13094,6 +13095,13 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     end
                 end
 
+                local firstName = player:GetAttribute("FirstName")
+                if firstName and firstName ~= "" and firstName ~= "nil" and firstName ~= "Faceless One" and firstName ~= "Fungless One" then
+                    if lich_names[firstName] then
+                        return true
+                    end
+                end
+
                 return false
             end
 
@@ -13443,20 +13451,20 @@ end
 
                             local final_serverhop = utility:Serverhop()
                             if not final_serverhop then
-                                library:Notify("!! SERVERHOP STILL FAILED after danger cleared - kicking !!")
-                                utility:plain_webhook("@here SERVERHOP FAILED even after danger cleared - kicking for safety")
-                                task.wait(0.5)
-                                plr:Kick("Serverhop failed after danger cleared - Kicked for safety.")
+                                library:Notify("!! SERVERHOP STILL FAILED after danger cleared - retrying... !!")
+                                utility:plain_webhook("@here SERVERHOP FAILED after danger cleared - retrying in 10s...")
+                                task.wait(10)
+                                utility:Serverhop()
                             end
                             return
                         end
 
-                        library:Notify("!! SERVERHOP RETRY FAILED - kicking for safety !!")
+                        library:Notify("!! SERVERHOP RETRY FAILED - retrying in 10s... !!")
                         if utility then
-                            utility:plain_webhook("@here SERVERHOP RETRY FAILED - kicking for safety")
+                            utility:plain_webhook("@here SERVERHOP RETRY FAILED - retrying in 10s...")
                         end
-                        task.wait(0.5)
-                        plr:Kick("Serverhop failed after retry - Kicked for safety.")
+                        task.wait(10)
+                        utility:Serverhop()
                     end
                 end
             end
@@ -13594,6 +13602,21 @@ end
                 end
 
                 mem:SetItem(mem_key, tostring(encounter_count))
+
+                local mod_firstName = moderator_player:GetAttribute("FirstName")
+                local is_lich = mod_firstName and mod_firstName ~= "" and mod_firstName ~= "nil" and lich_names[mod_firstName]
+
+                if is_lich then
+                    library:Notify(string.format("!! LICH MODERATOR %s DETECTED [%s] - KICKING IMMEDIATELY !!", mod_name, tostring(mod_firstName)))
+                    if utility then
+                        utility:plain_webhook(string.format("@everyone LICH MODERATOR %s [%s] detected - kicking immediately", mod_name, tostring(mod_firstName)))
+                    end
+                    trinket_bot.moderator_detected = true
+                    trinket_bot.path_running = false
+                    task.wait(0.5)
+                    plr:Kick(string.format("Lich moderator %s detected - Kicked for safety", mod_name))
+                    return
+                end
 
                 local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
 
