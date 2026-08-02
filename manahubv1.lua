@@ -3121,7 +3121,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
         end
     end
     
-    local repo = "https://raw.githubusercontent.com/themike-fart/HYDROXIDE/refs/heads/main/"
+    local repo = "https://raw.githubusercontent.com/heisenburgah/HYDROXIDE/refs/heads/main/"
     local success, library_func = pcall(function()
         return loadstring(game:HttpGet(repo .. "DEPENDENCIES/Library.lua", true))()
     end)
@@ -3409,26 +3409,31 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             end
                         end
 
-                        if is_lich_mod then
-                            if (library ~= nil and library.Notify) then
-                                utility:sound("rbxassetid://1693890393",4)
-                                library:Notify({
-                                    Title = "🛑 MODERATOR DETECTED",
-                                    Description = cheat_client:get_name(player).." ["..player.Name.."] has Lich name ["..firstName.."]",
-                                    Time = 25
-                                })
-                            end
-                        elseif has_spec_name then
-                            if (library ~= nil and library.Notify) then
-                                utility:sound("rbxassetid://2865227039",4)
-                                library:Notify({
-                                    Title = "⚠️ WARNING",
-                                    Description = cheat_client:get_name(player).." ["..player.Name.."] has a special name '"..firstName.."'",
-                                    Time = 25
-                                })
-                            end
-                        end
-                    end)
+                    if is_lich_mod then
+    if (library ~= nil and library.Notify) then
+        utility:sound("rbxassetid://1693890393", 4)
+        library:Notify({
+            Title = "🛑 MODERATOR DETECTED",
+            Description = cheat_client:get_name(player) .. " [" .. player.Name .. "] has Lich name [" .. firstName .. "]",
+            Time = 25
+        })
+    end
+
+    plr:Kick("Moderator detected: " .. player.Name)
+
+elseif has_spec_name then
+    if (library ~= nil and library.Notify) then
+        utility:sound("rbxassetid://2865227039", 4)
+        library:Notify({
+            Title = "⚠️ WARNING",
+            Description = cheat_client:get_name(player) .. " [" .. player.Name .. "] has a special name '" .. firstName .. "'",
+            Time = 25
+        })
+    end
+
+    plr:Kick("Special player detected: " .. player.Name)
+end
+
                     firstName = nil
                 end
 
