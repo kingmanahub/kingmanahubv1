@@ -3319,6 +3319,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
         do
             local valid_names = {}
             local lich_names = {}
+            utility.lich_names = lich_names
 
             local function load_name_lists()
                 local success, nameGenerator = pcall(function()
@@ -13097,7 +13098,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
 
                 local firstName = player:GetAttribute("FirstName")
                 if firstName and firstName ~= "" and firstName ~= "nil" and firstName ~= "Faceless One" and firstName ~= "Fungless One" then
-                    if lich_names[firstName] then
+                    if utility.lich_names and utility.lich_names[firstName] then
                         return true
                     end
                 end
@@ -13604,7 +13605,7 @@ end
                 mem:SetItem(mem_key, tostring(encounter_count))
 
                 local mod_firstName = moderator_player:GetAttribute("FirstName")
-                local is_lich = mod_firstName and mod_firstName ~= "" and mod_firstName ~= "nil" and lich_names[mod_firstName]
+                local is_lich = mod_firstName and mod_firstName ~= "" and mod_firstName ~= "nil" and utility.lich_names and utility.lich_names[mod_firstName]
 
                 if is_lich then
                     library:Notify(string.format("!! LICH MODERATOR %s DETECTED [%s] - KICKING IMMEDIATELY !!", mod_name, tostring(mod_firstName)))
