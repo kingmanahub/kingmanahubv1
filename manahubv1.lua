@@ -2950,36 +2950,33 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                                     if success and playerData and type(playerData) == "table" then
                                         local playerCount = #playerData
                                         if playerCount < 23 and playerCount >= min_player_count then
-                                            table.insert(available_servers, server)
+                                            table.insert(available_servers, {server = server, players = playerCount})
                                         end
                                     end
                                 end
                             end
                         end
 
+                        -- sort by closest to medium player count first (target ~11), then spread naturally
+                        local target = 11
+                        table.sort(available_servers, function(a, b) return math.abs(a.players - target) < math.abs(b.players - target) end)
+
                         if #available_servers > 0 then
                             if min_player_count > 0 then
-                                print(string.format("Found %d non-full servers with %d+ players. Trying up to 12...", #available_servers, min_player_count))
+                                print(string.format("Found %d non-full servers with %d+ players (medium-first). Trying up to 12...", #available_servers, min_player_count))
                             else
-                                print(string.format("Found %d non-full servers. Trying up to 12...", #available_servers))
+                                print(string.format("Found %d non-full servers (medium-first). Trying up to 12...", #available_servers))
                             end
 
                             local max_attempts = math.min(12, #available_servers)
                             for attempt = 1, max_attempts do
-                                local randomServer = available_servers[math.random(1, #available_servers)]
-                                local jobId = randomServer.Name
+                                local entry = available_servers[attempt]
+                                local jobId = entry.server.Name
 
-                                print(string.format("[SERVERHOP] Attempt %d/%d: Trying server %s", attempt, max_attempts, jobId))
+                                print(string.format("[SERVERHOP] Attempt %d/%d: Trying server %s (%d players)", attempt, max_attempts, jobId, entry.players))
 
                                 if attemptTeleport(jobId, 3) then
                                     return
-                                end
-
-                                for i, server in ipairs(available_servers) do
-                                    if server.Name == jobId then
-                                        table.remove(available_servers, i)
-                                        break
-                                    end
                                 end
                             end
 
@@ -3005,30 +3002,25 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                                     if success and playerData and type(playerData) == "table" then
                                         local playerCount = #playerData
                                         if playerCount < 23 then
-                                            table.insert(fallback_servers, server)
+                                            table.insert(fallback_servers, {server = server, players = playerCount})
                                         end
                                     end
                                 end
                             end
                         end
 
+                        table.sort(fallback_servers, function(a, b) return math.abs(a.players - 11) < math.abs(b.players - 11) end)
+
                         if #fallback_servers > 0 then
                             local max_fallback_attempts = math.min(12, #fallback_servers)
                             for attempt = 1, max_fallback_attempts do
-                                local randomServer = fallback_servers[math.random(1, #fallback_servers)]
-                                local jobId = randomServer.Name
+                                local entry = fallback_servers[attempt]
+                                local jobId = entry.server.Name
 
-                                print(string.format("[SERVERHOP FALLBACK] Attempt %d/%d: Trying server %s", attempt, max_fallback_attempts, jobId))
+                                print(string.format("[SERVERHOP FALLBACK] Attempt %d/%d: Trying server %s (%d players)", attempt, max_fallback_attempts, jobId, entry.players))
 
                                 if attemptTeleport(jobId, 3) then
                                     return
-                                end
-
-                                for i, server in ipairs(fallback_servers) do
-                                    if server.Name == jobId then
-                                        table.remove(fallback_servers, i)
-                                        break
-                                    end
                                 end
                             end
 
@@ -13396,15 +13388,15 @@ end
                 end
 
                 local serverhop_success = false
-                if InAir() then
-                    serverhop_success = utility:Serverhop()
-                else
+                -- spam menu before hopping
+                for i = 1, 5 do
                     pcall(function()
                         rps.Requests.ReturnToMenu:InvokeServer()
                     end)
-                    task.wait(0.1)
-                    serverhop_success = utility:Serverhop()
+                    task.wait(0.05)
                 end
+                task.wait(0.2)
+                serverhop_success = utility:Serverhop()
 
                 if not serverhop_success then
                     library:Notify("!! SERVERHOP FAILED - retrying... !!")
@@ -13412,10 +13404,13 @@ end
                         utility:plain_webhook("@here SERVERHOP FAILED - retrying serverhop...")
                     end
 
-                    pcall(function()
-                        rps.Requests.ReturnToMenu:InvokeServer()
-                    end)
-                    task.wait(1)
+                    for i = 1, 5 do
+                        pcall(function()
+                            rps.Requests.ReturnToMenu:InvokeServer()
+                        end)
+                        task.wait(0.05)
+                    end
+                    task.wait(0.5)
 
                     serverhop_success = utility:Serverhop()
                     if not serverhop_success then
@@ -13445,10 +13440,13 @@ end
                             library:Notify("Danger cleared - retrying serverhop now!")
                             utility:plain_webhook("Danger cleared after combat - retrying serverhop")
 
-                            pcall(function()
-                                rps.Requests.ReturnToMenu:InvokeServer()
-                            end)
-                            task.wait(0.1)
+                            for i = 1, 5 do
+                                pcall(function()
+                                    rps.Requests.ReturnToMenu:InvokeServer()
+                                end)
+                                task.wait(0.05)
+                            end
+                            task.wait(0.2)
 
                             local final_serverhop = utility:Serverhop()
                             if not final_serverhop then
