@@ -2714,7 +2714,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             end
         end
 
-        function utility:Serverhop()
+        function utility:Serverhop(prefer_empty)
             local httpService = Services.HttpService
             local bot_started = mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true"
             if bot_started then
@@ -2957,20 +2957,28 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             end
                         end
 
-                        -- sort by closest to medium player count first (target ~11), then spread naturally
-                        local target = 11
-                        table.sort(available_servers, function(a, b) return math.abs(a.players - target) < math.abs(b.players - target) end)
+                        if prefer_empty then
+                            -- danger/mod detected: sort emptiest first
+                            table.sort(available_servers, function(a, b) return a.players < b.players end)
+                        end
 
                         if #available_servers > 0 then
                             if min_player_count > 0 then
-                                print(string.format("Found %d non-full servers with %d+ players (medium-first). Trying up to 12...", #available_servers, min_player_count))
+                                print(string.format("Found %d non-full servers with %d+ players%s. Trying up to 12...", #available_servers, min_player_count, prefer_empty and " (emptiest-first)" or " (random)"))
                             else
-                                print(string.format("Found %d non-full servers (medium-first). Trying up to 12...", #available_servers))
+                                print(string.format("Found %d non-full servers%s. Trying up to 12...", #available_servers, prefer_empty and " (emptiest-first)" or " (random)"))
                             end
 
                             local max_attempts = math.min(12, #available_servers)
                             for attempt = 1, max_attempts do
-                                local entry = available_servers[attempt]
+                                local entry
+                                if prefer_empty then
+                                    entry = available_servers[attempt]
+                                else
+                                    local idx = math.random(1, #available_servers)
+                                    entry = available_servers[idx]
+                                    table.remove(available_servers, idx)
+                                end
                                 local jobId = entry.server.Name
 
                                 print(string.format("[SERVERHOP] Attempt %d/%d: Trying server %s (%d players)", attempt, max_attempts, jobId, entry.players))
@@ -3009,12 +3017,21 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             end
                         end
 
-                        table.sort(fallback_servers, function(a, b) return math.abs(a.players - 11) < math.abs(b.players - 11) end)
+                        if prefer_empty then
+                            table.sort(fallback_servers, function(a, b) return a.players < b.players end)
+                        end
 
                         if #fallback_servers > 0 then
                             local max_fallback_attempts = math.min(12, #fallback_servers)
                             for attempt = 1, max_fallback_attempts do
-                                local entry = fallback_servers[attempt]
+                                local entry
+                                if prefer_empty then
+                                    entry = fallback_servers[attempt]
+                                else
+                                    local idx = math.random(1, #fallback_servers)
+                                    entry = fallback_servers[idx]
+                                    table.remove(fallback_servers, idx)
+                                end
                                 local jobId = entry.server.Name
 
                                 print(string.format("[SERVERHOP FALLBACK] Attempt %d/%d: Trying server %s (%d players)", attempt, max_fallback_attempts, jobId, entry.players))
@@ -3032,7 +3049,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         utility:plain_webhook("@here SERVERHOP FAILED: All servers full or unavailable after 24 attempts. Retrying in 10s...")
                         warn("[SERVERHOP] All attempts failed - waiting 10s then retrying...")
                         task.wait(10)
-                        return utility:Serverhop()
+                        return utility:Serverhop(prefer_empty)
                     else
                         warn("[!] No servers found in ServerInfo, using fallback")
                         if blockTarget then
@@ -13134,7 +13151,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
 end
 
             local teleport_debounce = false
-            local function TrinketBotServerhop(reason, skip_test_mode_check)
+            local function TrinketBotServerhop(reason, skip_test_mode_check, prefer_empty)
                 if not skip_test_mode_check and trinket_bot.test_mode then
                     library:Notify(string.format("Serverhop blocked (test mode): %s", reason or "Unknown"))
                     return
@@ -13396,7 +13413,7 @@ end
                     task.wait(0.05)
                 end
                 task.wait(0.2)
-                serverhop_success = utility:Serverhop()
+                serverhop_success = utility:Serverhop(prefer_empty)
 
                 if not serverhop_success then
                     library:Notify("!! SERVERHOP FAILED - retrying... !!")
@@ -13412,7 +13429,7 @@ end
                     end
                     task.wait(0.5)
 
-                    serverhop_success = utility:Serverhop()
+                    serverhop_success = utility:Serverhop(prefer_empty)
                     if not serverhop_success then
                         local character = plr.Character
 
@@ -13448,12 +13465,12 @@ end
                             end
                             task.wait(0.2)
 
-                            local final_serverhop = utility:Serverhop()
+                            local final_serverhop = utility:Serverhop(prefer_empty)
                             if not final_serverhop then
                                 library:Notify("!! SERVERHOP STILL FAILED after danger cleared - retrying... !!")
                                 utility:plain_webhook("@here SERVERHOP FAILED after danger cleared - retrying in 10s...")
                                 task.wait(10)
-                                utility:Serverhop()
+                                utility:Serverhop(prefer_empty)
                             end
                             return
                         end
@@ -13463,12 +13480,13 @@ end
                             utility:plain_webhook("@here SERVERHOP RETRY FAILED - retrying in 10s...")
                         end
                         task.wait(10)
-                        utility:Serverhop()
+                        utility:Serverhop(prefer_empty)
                     end
                 end
             end
 
-            local function SafeServerhop(reason, skip_test_mode_check, skip_gate_escape)
+            local function SafeServerhop(reason, skip_test_mode_check, skip_gate_escape, prefer_empty)
+                if prefer_empty == nil then prefer_empty = true end
                 if plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") then
                     local pos = plr.Character.HumanoidRootPart.Position
                     mem:SetItem("lastPlayerPosition", string.format("%s,%s,%s", pos.X, pos.Y, pos.Z))
@@ -13480,7 +13498,7 @@ end
                     pcall(function()
                         rps.Requests.ReturnToMenu:InvokeServer()
                     end)
-                    TrinketBotServerhop(reason, skip_test_mode_check)
+                    TrinketBotServerhop(reason, skip_test_mode_check, prefer_empty)
                     return
                 end
 
@@ -13585,7 +13603,7 @@ end
                 pcall(function()
                     rps.Requests.ReturnToMenu:InvokeServer()
                 end)
-                TrinketBotServerhop(reason .. (escaped and " (escaped)" or " (escape failed)"), skip_test_mode_check)
+                TrinketBotServerhop(reason .. (escaped and " (escaped)" or " (escape failed)"), skip_test_mode_check, prefer_empty)
             end
 
             local function handle_moderator_detection(moderator_player)
@@ -13669,7 +13687,7 @@ end
                 else
                     library:Notify(string.format("!! MODERATOR %s DETECTED (encounter %d/3) - IMMEDIATE SERVERHOP !!", mod_name, encounter_count))
 
-                    TrinketBotServerhop(string.format("Moderator %s detected (encounter %d/3)", mod_name, encounter_count), true)
+                    TrinketBotServerhop(string.format("Moderator %s detected (encounter %d/3)", mod_name, encounter_count), true, true)
                 end
             end
 
@@ -13792,7 +13810,7 @@ end
                                     trinket_bot.path_running = false
                                     library:Notify(string.format("Player %s is within %d studs! Cannot start path.", other_player.Name, math.floor(proximity_check_distance)))
                                     if not test_mode and mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true" then
-                                        TrinketBotServerhop(string.format("Player %s within %d studs at spawn! Cannot start path - Serverhopping", other_player.Name, math.floor(proximity_check_distance)))
+                                        TrinketBotServerhop(string.format("Player %s within %d studs at spawn! Cannot start path - Serverhopping", other_player.Name, math.floor(proximity_check_distance)), nil, true)
                                     end
                                     return
                                 end
@@ -13890,7 +13908,7 @@ end
                     for _, other_player in next, plrs:GetPlayers() do
                         if other_player ~= plr and has_observe(other_player) then
                             library:Notify("Illusionist detected! Serverhopping.")
-                            TrinketBotServerhop(string.format("Illusionist in server; %s - Serverhopping", other_player.Name))
+                            TrinketBotServerhop(string.format("Illusionist in server; %s - Serverhopping", other_player.Name), nil, true)
                             return
                         end
                     end
@@ -13926,7 +13944,8 @@ end
                     )
 
                     TrinketBotServerhop(
-                        player.Name.." joined with "..skill
+                        player.Name.." joined with "..skill,
+                        nil, true
                     )
 
                     return
@@ -14001,14 +14020,14 @@ end
 
                                 if has_observe(other_player) then
                                     library:Notify("Illusionist in server! Serverhopping.")
-                                    TrinketBotServerhop(string.format("Illusionist in server; %s has Observe - Serverhopping", other_player.Name))
+                                    TrinketBotServerhop(string.format("Illusionist in server; %s has Observe - Serverhopping", other_player.Name), nil, true)
                                     return
                                 end
 
                                 local conn = utility:Connection(backpack.ChildAdded, function(child)
                                     if child.Name == "Observe" then
                                         library:Notify("Illusionist detected! Serverhopping.")
-                                        TrinketBotServerhop(string.format("Illusionist detected; %s acquired Observe - Serverhopping", other_player.Name))
+                                        TrinketBotServerhop(string.format("Illusionist detected; %s acquired Observe - Serverhopping", other_player.Name), nil, true)
                                     end
                                 end)
                                 table.insert(illu_connections, conn)
@@ -14018,7 +14037,7 @@ end
                                 task.wait(0.5)
                                 if has_observe(other_player) then
                                     library:Notify("Illusionist respawned! Serverhopping.")
-                                    TrinketBotServerhop(string.format("Illusionist detected; %s respawned with Observe - Serverhopping", other_player.Name))
+                                    TrinketBotServerhop(string.format("Illusionist detected; %s respawned with Observe - Serverhopping", other_player.Name), nil, true)
                                 end
                             end)
                             table.insert(illu_connections, char_conn)
@@ -14039,14 +14058,14 @@ end
 
                             if has_observe(player) then
                                 library:Notify("Illusionist joined! Serverhopping.")
-                                TrinketBotServerhop(string.format("Illusionist joined; %s with Observe - Serverhopping", player.Name))
+                                TrinketBotServerhop(string.format("Illusionist joined; %s with Observe - Serverhopping", player.Name), nil, true)
                                 return
                             end
 
                             local bp_conn = utility:Connection(backpack.ChildAdded, function(child)
                                 if child.Name == "Observe" then
                                     library:Notify("Illusionist joined! Serverhopping.")
-                                    TrinketBotServerhop(string.format("Illusionist joined; %s acquired Observe - Serverhopping", player.Name))
+                                    TrinketBotServerhop(string.format("Illusionist joined; %s acquired Observe - Serverhopping", player.Name), nil, true)
                                 end
                             end)
                             table.insert(illu_connections, bp_conn)
@@ -14056,7 +14075,7 @@ end
                             task.wait(0.5)
                             if has_observe(player) then
                                 library:Notify("Illusionist respawned! Serverhopping.")
-                                TrinketBotServerhop(string.format("Illusionist respawned; %s with Observe - Serverhopping", player.Name))
+                                TrinketBotServerhop(string.format("Illusionist respawned; %s with Observe - Serverhopping", player.Name), nil, true)
                             end
                         end)
                         table.insert(illu_connections, char_added_conn)
@@ -14080,7 +14099,7 @@ end
                                     if tool:IsA("Tool") and emergency_conditions[tool.Name] then
                                         library:Notify(string.format("Player %s already has %s - instant serverhop!", other_player.Name, tool.Name))
                                         trinket_bot.path_running = false
-                                        TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop (detected on bot start)", other_player.Name, other_player.UserId, tool.Name))
+                                        TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop (detected on bot start)", other_player.Name, other_player.UserId, tool.Name), nil, true)
                                         break
                                     end
                                 end
@@ -14108,11 +14127,11 @@ end
                             if owner_player and owner_player ~= plr then
                                 library:Notify(string.format("Player %s has %s - instant serverhop!", owner_player.Name, descendant.Name))
                                 trinket_bot.path_running = false
-                                TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop", owner_player.Name, owner_player.UserId, descendant.Name))
+                                TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop", owner_player.Name, owner_player.UserId, descendant.Name), nil, true)
                             elseif not owner_player then
                                 library:Notify(string.format("Dangerous item %s detected in server - instant serverhop!", descendant.Name))
                                 trinket_bot.path_running = false
-                                TrinketBotServerhop(string.format("Dangerous item %s detected in server - instant serverhop (no owner identified)", descendant.Name))
+                                TrinketBotServerhop(string.format("Dangerous item %s detected in server - instant serverhop (no owner identified)", descendant.Name), nil, true)
                             end
                         end
                     end))
@@ -14717,13 +14736,13 @@ end
                                 else
                                     library:Notify("Gate to last point failed - serverhopping immediately")
                                     trinket_bot.path_running = false
-                                    TrinketBotServerhop(string.format("GNAV detected (%s) but gate failed", gnav_player_name))
+                                    TrinketBotServerhop(string.format("GNAV detected (%s) but gate failed", gnav_player_name), nil, true)
                                     return
                                 end
                             else
                                 library:Notify("No gate points in path - serverhopping immediately")
                                 trinket_bot.path_running = false
-                                TrinketBotServerhop(string.format("GNAV detected (%s) - no gates available", gnav_player_name))
+                                TrinketBotServerhop(string.format("GNAV detected (%s) - no gates available", gnav_player_name), nil, true)
                                 return
                             end
                         end
@@ -14885,7 +14904,7 @@ end
                                         library:Notify(string.format("Emergency gate attempted but SnapCool active + player in critical range (%.0f studs) - instant serverhop to escape %s", closest_player_dist, player_name))
                                         emergency_gate_in_progress = false
                                         trinket_bot.path_running = false
-                                        TrinketBotServerhop(string.format("Emergency gate with SnapCool + player in critical range while escaping %s", player_name))
+                                        TrinketBotServerhop(string.format("Emergency gate with SnapCool + player in critical range while escaping %s", player_name), nil, true)
                                         return
                                     else
                                         library:Notify(string.format("SnapCool active but player not in critical range (%.0f studs) - waiting for SnapCool to expire", closest_player_dist))
@@ -14917,7 +14936,7 @@ end
                                                             if snapcool_wait_platform then snapcool_wait_platform:Destroy() end
                                                             emergency_gate_in_progress = false
                                                             trinket_bot.path_running = false
-                                                            TrinketBotServerhop(string.format("Player entered critical range during SnapCool wait while escaping %s", player_name))
+                                                            TrinketBotServerhop(string.format("Player entered critical range during SnapCool wait while escaping %s", player_name), nil, true)
                                                             return
                                                         end
                                                     end
@@ -14939,7 +14958,7 @@ end
                                             library:Notify("SnapCool wait timeout (10s) - serverhopping")
                                             emergency_gate_in_progress = false
                                             trinket_bot.path_running = false
-                                            TrinketBotServerhop("SnapCool wait timeout during emergency gate")
+                                            TrinketBotServerhop("SnapCool wait timeout during emergency gate", nil, true)
                                             return
                                         end
 
@@ -15004,7 +15023,7 @@ end
                                             if (tick() - wait_start) >= max_wait then
                                                 library:Notify("SnapCool/Danger wait timeout (30s) - serverhopping")
                                                 emergency_gate_in_progress = false
-                                                TrinketBotServerhop("SnapCool/Danger timeout during emergency gate")
+                                                TrinketBotServerhop("SnapCool/Danger timeout during emergency gate", nil, true)
                                                 return
                                             end
 
@@ -15142,7 +15161,7 @@ end
                                                     library:Notify(string.format("Emergency gate retry failed - serverhopping to escape %s", player_name))
                                                     emergency_gate_in_progress = false
                                                     trinket_bot.path_running = false
-                                                    TrinketBotServerhop(string.format("Emergency gate retry failed while escaping %s", player_name))
+                                                    TrinketBotServerhop(string.format("Emergency gate retry failed while escaping %s", player_name), nil, true)
                                                     return
                                                 end
                                             else
@@ -15158,7 +15177,7 @@ end
                                                     library:Notify(string.format("SnapCool timeout or Danger detected - serverhopping to escape %s", player_name))
                                                     emergency_gate_in_progress = false
                                                     trinket_bot.path_running = false
-                                                    TrinketBotServerhop(string.format("Emergency gate failed (SnapCool timeout) while escaping %s", player_name))
+                                                    TrinketBotServerhop(string.format("Emergency gate failed (SnapCool timeout) while escaping %s", player_name), nil, true)
                                                 else
                                                     emergency_gate_in_progress = false
                                                 end
@@ -15182,7 +15201,7 @@ end
                                                 library:Notify(string.format("Emergency gate failed - serverhopping to escape %s", player_name))
                                                 emergency_gate_in_progress = false
                                                 trinket_bot.path_running = false
-                                                TrinketBotServerhop(string.format("Emergency gate failed while escaping %s", player_name))
+                                                TrinketBotServerhop(string.format("Emergency gate failed while escaping %s", player_name), nil, true)
                                             else
                                                 emergency_gate_in_progress = false
                                             end
@@ -15240,13 +15259,13 @@ end
 
                                         emergency_gate_in_progress = false
                                         trinket_bot.path_running = false
-                                        TrinketBotServerhop(string.format("Escaped %s via path traversal (no gates)", player_name))
+                                        TrinketBotServerhop(string.format("Escaped %s via path traversal (no gates)", player_name), nil, true)
                                         return
                                     else
                                         library:Notify(string.format("No clear gate point available - serverhopping to escape %s", player_name))
                                         emergency_gate_in_progress = false
                                         trinket_bot.path_running = false
-                                        TrinketBotServerhop(string.format("No clear gate point while escaping %s", player_name))
+                                        TrinketBotServerhop(string.format("No clear gate point while escaping %s", player_name), nil, true)
                                         return
                                     end
                                 else
@@ -15591,7 +15610,7 @@ end
 
                                 library:Notify("All gate points blocked or failed - serverhopping")
                                 trinket_bot.path_running = false
-                                TrinketBotServerhop("All gate points blocked or failed")
+                                TrinketBotServerhop("All gate points blocked or failed", nil, true)
                                 return
                             end
                         else
@@ -15799,7 +15818,7 @@ end
                                         library:Notify(string.format("Emergency gate failed after retries - serverhopping to escape %s", player_name))
                                         emergency_gate_in_progress = false
                                         trinket_bot.path_running = false
-                                        TrinketBotServerhop(string.format("Emergency gate failed while escaping %s", player_name))
+                                        TrinketBotServerhop(string.format("Emergency gate failed while escaping %s", player_name), nil, true)
                                     else
                                         emergency_gate_in_progress = false
                                     end
@@ -15853,13 +15872,13 @@ end
 
                                     emergency_gate_in_progress = false
                                     trinket_bot.path_running = false
-                                    TrinketBotServerhop(string.format("Escaped %s via path traversal (no gates)", player_name))
+                                    TrinketBotServerhop(string.format("Escaped %s via path traversal (no gates)", player_name), nil, true)
                                     return
                                 else
                                     library:Notify(string.format("No clear gate point available - serverhopping to escape %s", player_name))
                                     emergency_gate_in_progress = false
                                     trinket_bot.path_running = false
-                                    TrinketBotServerhop(string.format("No gate available to escape %s", player_name))
+                                    TrinketBotServerhop(string.format("No gate available to escape %s", player_name), nil, true)
                                     return
                                 end
                             end
@@ -15882,7 +15901,7 @@ end
                                     end
 
                                     trinket_bot.path_running = false
-                                    TrinketBotServerhop(string.format("Shrieker detected near point %d - returned to point 1", i))
+                                    TrinketBotServerhop(string.format("Shrieker detected near point %d - returned to point 1", i), nil, true)
                                     return
                                 else
                                     local next_gate_point = nil
@@ -15907,13 +15926,13 @@ end
                                         else
                                             library:Notify("Gate failed during Shrieker escape - serverhopping")
                                             trinket_bot.path_running = false
-                                            TrinketBotServerhop(string.format("Shrieker at point %d, gate escape failed", i))
+                                            TrinketBotServerhop(string.format("Shrieker at point %d, gate escape failed", i), nil, true)
                                             return
                                         end
                                     else
                                         library:Notify("No more gate points to escape Shrieker - serverhopping")
                                         trinket_bot.path_running = false
-                                        TrinketBotServerhop(string.format("Shrieker at point %d, no gate available", i))
+                                        TrinketBotServerhop(string.format("Shrieker at point %d, no gate available", i), nil, true)
                                         return
                                     end
                                 end
@@ -15935,7 +15954,7 @@ end
                         if trinket_bot.original_point_1_position then
                             local dist_to_original_p1 = (point.position - trinket_bot.original_point_1_position).Magnitude
                             if dist_to_original_p1 < 5 and i > 1 then
-                                TrinketBotServerhop("back to point 1!!!")
+                                TrinketBotServerhop("back to point 1!!!", nil, true)
                                 return
                             end
                         end
@@ -15948,7 +15967,7 @@ end
                                         local player_distance = (other_player.Character.HumanoidRootPart.Position - point.position).Magnitude
                                         if player_distance <= 150 then
                                             library:Notify(string.format("Player %s at trinket check point %d! Serverhopping...", other_player.Name, i))
-                                            TrinketBotServerhop(string.format("Player %s at trinket check point %d", other_player.Name, i))
+                                            TrinketBotServerhop(string.format("Player %s at trinket check point %d", other_player.Name, i), nil, true)
                                             return
                                         end
                                     end
@@ -16199,7 +16218,7 @@ end
                                     end
                                 end
 
-                                TrinketBotServerhop(string.format("Player %s blocking path so i traversed back to point 1!!", player_name))
+                                TrinketBotServerhop(string.format("Player %s blocking path so i traversed back to point 1!!", player_name), nil, true)
                                 return
                             end
                         end
@@ -17288,7 +17307,8 @@ end
             string.format(
                 "MODERATOR IN SERVER; %s - Delayed serverhop after 10s",
                 other_player.Name
-            )
+            ),
+            nil, true
         )
 
         return
@@ -17315,7 +17335,8 @@ end
                         "%s has spec skill %s",
                         other_player.Name,
                         skill
-                    )
+                    ),
+                    nil, true
                 )
 
                 return
@@ -17328,7 +17349,7 @@ end
                             if other_player ~= plr and has_observe(other_player) then
                                 library:Notify("Illusionist in server! Serverhopping...")
                                 task.wait(0.5)
-                                TrinketBotServerhop(string.format("ILLUSIONIST IN SERVER; %s - Serverhopping before spawn", other_player.Name))
+                                TrinketBotServerhop(string.format("ILLUSIONIST IN SERVER; %s - Serverhopping before spawn", other_player.Name), nil, true)
                                 return
                             end
                         end
@@ -17557,7 +17578,7 @@ end
                                                     else
                                                         library:Notify("Could not remove ForceField at saved position - serverhopping")
                                                         trinket_bot.path_running = false
-                                                        TrinketBotServerhop("Failed to remove ForceField for resume at saved position")
+                                                        TrinketBotServerhop("Failed to remove ForceField for resume at saved position", nil, true)
                                                         return
                                                     end
                                                 elseif path_has_gates then
@@ -17666,13 +17687,13 @@ end
                                                             else
                                                                 library:Notify("Resume gate to last point failed - serverhopping")
                                                                 trinket_bot.path_running = false
-                                                                TrinketBotServerhop("Resume gate failed after ForceField removal")
+                                                                TrinketBotServerhop("Resume gate failed after ForceField removal", nil, true)
                                                                 return
                                                             end
                                                         else
                                                             library:Notify("Could not remove ForceField - serverhopping")
                                                             trinket_bot.path_running = false
-                                                            TrinketBotServerhop("Failed to remove ForceField for resume gate")
+                                                            TrinketBotServerhop("Failed to remove ForceField for resume gate", nil, true)
                                                             return
                                                         end
                                                     else
