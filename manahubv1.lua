@@ -283,6 +283,41 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
         teleport_failed = true
         teleport_fail_reason = errorMessage or "Unknown error"
         warn(string.format("[TELEPORT FAILED] %s - Retrying serverhop...", teleport_fail_reason))
+
+        -- dismiss error dialog (Error 773 etc)
+        pcall(function()
+            local coreGui = game:GetService("CoreGui")
+            local errorPrompt = coreGui:FindFirstChild("RobloxPromptGui")
+            if errorPrompt then
+                local promptOverlay = errorPrompt:FindFirstChild("promptOverlay", true)
+                if promptOverlay then
+                    for _, btn in ipairs(promptOverlay:GetDescendants()) do
+                        if btn:IsA("TextButton") or btn:IsA("ImageButton") then
+                            pcall(function() btn.Activated:Fire() end)
+                            pcall(function() btn:Press() end)
+                        end
+                    end
+                end
+            end
+        end)
+
+        -- fallback: nuke entire error GUI
+        task.delay(1, function()
+            pcall(function()
+                local coreGui = game:GetService("CoreGui")
+                local errorPrompt = coreGui:FindFirstChild("RobloxPromptGui")
+                if errorPrompt then
+                    local promptOverlay = errorPrompt:FindFirstChild("promptOverlay", true)
+                    if promptOverlay then
+                        for _, child in ipairs(promptOverlay:GetChildren()) do
+                            if child:IsA("Frame") or child:IsA("ImageLabel") then
+                                child.Visible = false
+                            end
+                        end
+                    end
+                end
+            end)
+        end)
     end)
 
     local is_gaia = game.PlaceId == 5208655184;
@@ -2758,13 +2793,34 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         return true
                     else
                         retries = retries + 1
-                        if retries < maxRetries then
-                            warn(string.format("[RETRY %d/%d] Teleport failed: %s - Trying another server...", retries, maxRetries, teleport_fail_reason))
-                            return false
-                        else
+                        warn(string.format("[RETRY %d/%d] Teleport failed: %s", retries, maxRetries, teleport_fail_reason))
+
+                        -- dismiss any error dialog before retry
+                        pcall(function()
+                            local coreGui = game:GetService("CoreGui")
+                            local errorPrompt = coreGui:FindFirstChild("RobloxPromptGui")
+                            if errorPrompt then
+                                local promptOverlay = errorPrompt:FindFirstChild("promptOverlay", true)
+                                if promptOverlay then
+                                    for _, btn in ipairs(promptOverlay:GetDescendants()) do
+                                        if btn:IsA("TextButton") or btn:IsA("ImageButton") then
+                                            pcall(function() btn.Activated:Fire() end)
+                                        end
+                                    end
+                                    for _, child in ipairs(promptOverlay:GetChildren()) do
+                                        if child:IsA("Frame") or child:IsA("ImageLabel") then
+                                            child.Visible = false
+                                        end
+                                    end
+                                end
+                            end
+                        end)
+
+                        if retries >= maxRetries then
                             warn(string.format("[MAX RETRIES] Failed to teleport after %d attempts", maxRetries))
                             return false
                         end
+                        task.wait(1)
                     end
                 end
 
@@ -3046,9 +3102,9 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             warn("[SERVERHOP FALLBACK] No non-full servers available at all")
                         end
 
-                        utility:plain_webhook("@here SERVERHOP FAILED: All servers full or unavailable after 24 attempts. Retrying in 10s...")
-                        warn("[SERVERHOP] All attempts failed - waiting 10s then retrying...")
-                        task.wait(10)
+                        utility:plain_webhook("@here SERVERHOP FAILED: All servers full or unavailable after 24 attempts. Retrying...")
+                        warn("[SERVERHOP] All attempts failed - retrying immediately...")
+                        task.wait(1)
                         return utility:Serverhop(prefer_empty)
                     else
                         warn("[!] No servers found in ServerInfo, using fallback")
@@ -13468,18 +13524,18 @@ end
                             local final_serverhop = utility:Serverhop(prefer_empty)
                             if not final_serverhop then
                                 library:Notify("!! SERVERHOP STILL FAILED after danger cleared - retrying... !!")
-                                utility:plain_webhook("@here SERVERHOP FAILED after danger cleared - retrying in 10s...")
-                                task.wait(10)
+                                utility:plain_webhook("@here SERVERHOP FAILED after danger cleared - retrying...")
+                                task.wait(1)
                                 utility:Serverhop(prefer_empty)
                             end
                             return
                         end
 
-                        library:Notify("!! SERVERHOP RETRY FAILED - retrying in 10s... !!")
+                        library:Notify("!! SERVERHOP RETRY FAILED - retrying... !!")
                         if utility then
-                            utility:plain_webhook("@here SERVERHOP RETRY FAILED - retrying in 10s...")
+                            utility:plain_webhook("@here SERVERHOP RETRY FAILED - retrying...")
                         end
-                        task.wait(10)
+                        task.wait(1)
                         utility:Serverhop(prefer_empty)
                     end
                 end
