@@ -284,39 +284,77 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
         teleport_fail_reason = errorMessage or "Unknown error"
         warn(string.format("[TELEPORT FAILED] %s - Retrying serverhop...", teleport_fail_reason))
 
-        -- dismiss error dialog (Error 773 etc)
-        pcall(function()
-            local coreGui = game:GetService("CoreGui")
-            local errorPrompt = coreGui:FindFirstChild("RobloxPromptGui")
-            if errorPrompt then
-                local promptOverlay = errorPrompt:FindFirstChild("promptOverlay", true)
-                if promptOverlay then
-                    for _, btn in ipairs(promptOverlay:GetDescendants()) do
-                        if btn:IsA("TextButton") or btn:IsA("ImageButton") then
-                            pcall(function() btn.Activated:Fire() end)
-                            pcall(function() btn:Press() end)
-                        end
-                    end
-                end
-            end
-        end)
+        -- dismiss error dialog (Error 773 etc) - multiple methods
+        task.spawn(function()
+            for attempt = 1, 10 do
+                task.wait(0.3)
 
-        -- fallback: nuke entire error GUI
-        task.delay(1, function()
-            pcall(function()
-                local coreGui = game:GetService("CoreGui")
-                local errorPrompt = coreGui:FindFirstChild("RobloxPromptGui")
-                if errorPrompt then
-                    local promptOverlay = errorPrompt:FindFirstChild("promptOverlay", true)
-                    if promptOverlay then
-                        for _, child in ipairs(promptOverlay:GetChildren()) do
-                            if child:IsA("Frame") or child:IsA("ImageLabel") then
-                                child.Visible = false
+                -- Method 1: find OK button and VIM click its position
+                pcall(function()
+                    local coreGui = game:GetService("CoreGui")
+                    local errorPrompt = coreGui:FindFirstChild("RobloxPromptGui")
+                    if errorPrompt then
+                        for _, btn in ipairs(errorPrompt:GetDescendants()) do
+                            if (btn:IsA("TextButton") or btn:IsA("ImageButton")) and btn.Visible and btn.AbsoluteSize.X > 20 then
+                                local pos = btn.AbsolutePosition
+                                local size = btn.AbsoluteSize
+                                local cx = pos.X + size.X / 2
+                                local cy = pos.Y + size.Y / 2
+
+                                if vim then
+                                    vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
+                                    task.wait(0.05)
+                                    vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
+                                end
+
+                                pcall(function() firesignal(btn.MouseButton1Click) end)
+                                pcall(function() firesignal(btn.Activated) end)
                             end
                         end
                     end
+                end)
+
+                -- Method 2: destroy the error prompt entirely
+                pcall(function()
+                    local coreGui = game:GetService("CoreGui")
+                    local errorPrompt = coreGui:FindFirstChild("RobloxPromptGui")
+                    if errorPrompt then
+                        for _, child in ipairs(errorPrompt:GetDescendants()) do
+                            if child:IsA("Frame") and child.Visible and child.AbsoluteSize.Y > 100 then
+                                child:Destroy()
+                            end
+                        end
+                    end
+                end)
+
+                -- Method 3: GuiService clear error
+                pcall(function()
+                    local guiService = game:GetService("GuiService")
+                    if guiService.ClearError then
+                        guiService:ClearError()
+                    end
+                end)
+
+                -- Check if dialog gone
+                local still_visible = false
+                pcall(function()
+                    local coreGui = game:GetService("CoreGui")
+                    local errorPrompt = coreGui:FindFirstChild("RobloxPromptGui")
+                    if errorPrompt then
+                        for _, child in ipairs(errorPrompt:GetDescendants()) do
+                            if child:IsA("Frame") and child.Visible and child.AbsoluteSize.Y > 100 then
+                                still_visible = true
+                                break
+                            end
+                        end
+                    end
+                end)
+
+                if not still_visible then
+                    warn("[TELEPORT] Error dialog dismissed on attempt " .. attempt)
+                    break
                 end
-            end)
+            end
         end)
     end)
 
@@ -2800,20 +2838,29 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             local coreGui = game:GetService("CoreGui")
                             local errorPrompt = coreGui:FindFirstChild("RobloxPromptGui")
                             if errorPrompt then
-                                local promptOverlay = errorPrompt:FindFirstChild("promptOverlay", true)
-                                if promptOverlay then
-                                    for _, btn in ipairs(promptOverlay:GetDescendants()) do
-                                        if btn:IsA("TextButton") or btn:IsA("ImageButton") then
-                                            pcall(function() btn.Activated:Fire() end)
+                                for _, btn in ipairs(errorPrompt:GetDescendants()) do
+                                    if (btn:IsA("TextButton") or btn:IsA("ImageButton")) and btn.Visible and btn.AbsoluteSize.X > 20 then
+                                        local pos = btn.AbsolutePosition
+                                        local size = btn.AbsoluteSize
+                                        if vim then
+                                            vim:SendMouseButtonEvent(pos.X + size.X/2, pos.Y + size.Y/2, 0, true, game, 0)
+                                            task.wait(0.05)
+                                            vim:SendMouseButtonEvent(pos.X + size.X/2, pos.Y + size.Y/2, 0, false, game, 0)
                                         end
+                                        pcall(function() firesignal(btn.MouseButton1Click) end)
+                                        pcall(function() firesignal(btn.Activated) end)
                                     end
-                                    for _, child in ipairs(promptOverlay:GetChildren()) do
-                                        if child:IsA("Frame") or child:IsA("ImageLabel") then
-                                            child.Visible = false
-                                        end
+                                end
+                                for _, child in ipairs(errorPrompt:GetDescendants()) do
+                                    if child:IsA("Frame") and child.Visible and child.AbsoluteSize.Y > 100 then
+                                        child:Destroy()
                                     end
                                 end
                             end
+                        end)
+                        pcall(function()
+                            local guiService = game:GetService("GuiService")
+                            if guiService.ClearError then guiService:ClearError() end
                         end)
 
                         if retries >= maxRetries then
