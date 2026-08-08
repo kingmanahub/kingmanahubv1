@@ -7380,8 +7380,8 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             end
                         end)
 
-                        repeat task.wait(0.25) until plr.Character
-                        repeat task.wait(0.25) until FindFirstChild(plr.Character, "HumanoidRootPart")
+                        repeat task.wait(0.25) until plr.Character or not mem:HasItem("dayfarming")
+                        repeat task.wait(0.25) until (plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart")) or not mem:HasItem("dayfarming")
                         task.wait(1)
 
                         if mem:HasItem('dayfarming_range') then
@@ -13516,7 +13516,27 @@ end
                     task.wait(0.05)
                 end
                 task.wait(0.2)
-                serverhop_success = utility:Serverhop(prefer_empty)
+
+                -- watchdog: if still in game after 60s, force kick
+                local watchdog_active = true
+                task.spawn(function()
+                    task.wait(60)
+                    if watchdog_active then
+                        warn("[WATCHDOG] Still in game 60s after serverhop attempt - force kicking")
+                        pcall(function()
+                            utility:plain_webhook("@here WATCHDOG: Bot stuck after serverhop for 60s - force kicking")
+                        end)
+                        task.wait(0.5)
+                        plr:Kick("Serverhop watchdog timeout - stuck after 60s")
+                    end
+                end)
+
+                local hop_ok, hop_err = pcall(function()
+                    serverhop_success = utility:Serverhop(prefer_empty)
+                end)
+                if not hop_ok then
+                    warn("[SERVERHOP] pcall error: " .. tostring(hop_err))
+                end
 
                 if not serverhop_success then
                     library:Notify("!! SERVERHOP FAILED - retrying... !!")
@@ -13532,7 +13552,7 @@ end
                     end
                     task.wait(0.5)
 
-                    serverhop_success = utility:Serverhop(prefer_empty)
+                    pcall(function() serverhop_success = utility:Serverhop(prefer_empty) end)
                     if not serverhop_success then
                         local character = plr.Character
 
@@ -13553,8 +13573,14 @@ end
                                 end
                             end)
 
-                            while not danger_cleared do
+                            local danger_wait_start = tick()
+                            while not danger_cleared and (tick() - danger_wait_start) < 30 do
                                 task.wait(0.1)
+                            end
+
+                            if not danger_cleared then
+                                warn("[SERVERHOP] Danger wait timeout 30s - hopping anyway")
+                                if danger_connection then danger_connection:Disconnect() end
                             end
 
                             library:Notify("Danger cleared - retrying serverhop now!")
@@ -13568,12 +13594,12 @@ end
                             end
                             task.wait(0.2)
 
-                            local final_serverhop = utility:Serverhop(prefer_empty)
-                            if not final_serverhop then
+                            local final_ok, final_result = pcall(function() return utility:Serverhop(prefer_empty) end)
+                            if not (final_ok and final_result) then
                                 library:Notify("!! SERVERHOP STILL FAILED after danger cleared - retrying... !!")
                                 utility:plain_webhook("@here SERVERHOP FAILED after danger cleared - retrying...")
                                 task.wait(1)
-                                utility:Serverhop(prefer_empty)
+                                pcall(function() utility:Serverhop(prefer_empty) end)
                             end
                             return
                         end
@@ -13583,7 +13609,12 @@ end
                             utility:plain_webhook("@here SERVERHOP RETRY FAILED - retrying...")
                         end
                         task.wait(1)
-                        utility:Serverhop(prefer_empty)
+                        local last_ok = pcall(function() utility:Serverhop(prefer_empty) end)
+                        if not last_ok then
+                            warn("[SERVERHOP] All pcall retries failed - kicking as last resort")
+                            task.wait(0.5)
+                            plr:Kick("Serverhop completely failed - all retries exhausted")
+                        end
                     end
                 end
             end
@@ -17472,8 +17503,23 @@ end
                             end
                         end)
 
-                        repeat task.wait(0.25) until plr.Character
-                        repeat task.wait(0.25) until plr.Character:FindFirstChild("HumanoidRootPart")
+                        repeat task.wait(0.25) until plr.Character or not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true")
+                        if not plr.Character then
+                            warn("[AUTO-START] Character never loaded - kicking")
+                            utility:plain_webhook("@everyone Character never loaded during auto-start - kicking")
+                            task.wait(0.5)
+                            plr:Kick("Character never loaded during auto-start")
+                            return
+                        end
+                        local hrp_timeout = 0
+                        repeat task.wait(0.25) hrp_timeout = hrp_timeout + 1 until plr.Character:FindFirstChild("HumanoidRootPart") or hrp_timeout > 120
+                        if not plr.Character:FindFirstChild("HumanoidRootPart") then
+                            warn("[AUTO-START] HumanoidRootPart never loaded - kicking")
+                            utility:plain_webhook("@everyone HRP never loaded during auto-start - kicking")
+                            task.wait(0.5)
+                            plr:Kick("HRP never loaded during auto-start")
+                            return
+                        end
                         task.wait(1)
 
                         local auto_start_death_connection
