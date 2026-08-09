@@ -13517,20 +13517,6 @@ end
                 end
                 task.wait(0.2)
 
-                -- watchdog: if still in game after 60s, force kick
-                local watchdog_active = true
-                task.spawn(function()
-                    task.wait(60)
-                    if watchdog_active then
-                        warn("[WATCHDOG] Still in game 60s after serverhop attempt - force kicking")
-                        pcall(function()
-                            utility:plain_webhook("@here WATCHDOG: Bot stuck after serverhop for 60s - force kicking")
-                        end)
-                        task.wait(0.5)
-                        plr:Kick("Serverhop watchdog timeout - stuck after 60s")
-                    end
-                end)
-
                 local hop_ok, hop_err = pcall(function()
                     serverhop_success = utility:Serverhop(prefer_empty)
                 end)
