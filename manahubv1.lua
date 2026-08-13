@@ -14213,14 +14213,36 @@ end
                 if next(emergency_conditions) ~= nil then
                     local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
                     if not stay_in_server then
+                        local bot_hrp = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart")
                         for _, other_player in next, plrs:GetPlayers() do
-                            if other_player ~= plr and other_player.Character then
-                                for _, tool in next, other_player.Character:GetChildren() do
-                                    if tool:IsA("Tool") and emergency_conditions[tool.Name] then
-                                        library:Notify(string.format("Player %s already has %s - instant serverhop!", other_player.Name, tool.Name))
-                                        trinket_bot.path_running = false
-                                        TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop (detected on bot start)", other_player.Name, other_player.UserId, tool.Name), nil, true)
-                                        break
+                            if other_player ~= plr then
+                                local other_hrp = other_player.Character and FindFirstChild(other_player.Character, "HumanoidRootPart")
+                                local dist = (bot_hrp and other_hrp) and (bot_hrp.Position - other_hrp.Position).Magnitude or 0
+
+                                if dist <= 500 or not other_hrp then
+                                    -- check character (equipped)
+                                    if other_player.Character then
+                                        for _, tool in next, other_player.Character:GetChildren() do
+                                            if tool:IsA("Tool") and emergency_conditions[tool.Name] then
+                                                library:Notify(string.format("Player %s has %s (%.0f studs) - instant serverhop!", other_player.Name, tool.Name, dist))
+                                                trinket_bot.path_running = false
+                                                TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop (detected on bot start)", other_player.Name, other_player.UserId, tool.Name), nil, true)
+                                                return
+                                            end
+                                        end
+                                    end
+
+                                    -- check backpack
+                                    local backpack = FindFirstChild(other_player, "Backpack")
+                                    if backpack then
+                                        for _, tool in next, backpack:GetChildren() do
+                                            if tool:IsA("Tool") and emergency_conditions[tool.Name] then
+                                                library:Notify(string.format("Player %s has %s in backpack (%.0f studs) - instant serverhop!", other_player.Name, tool.Name, dist))
+                                                trinket_bot.path_running = false
+                                                TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s in backpack - instant serverhop (detected on bot start)", other_player.Name, other_player.UserId, tool.Name), nil, true)
+                                                return
+                                            end
+                                        end
                                     end
                                 end
                             end
@@ -14245,15 +14267,51 @@ end
                             end
 
                             if owner_player and owner_player ~= plr then
-                                library:Notify(string.format("Player %s has %s - instant serverhop!", owner_player.Name, descendant.Name))
-                                trinket_bot.path_running = false
-                                TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop", owner_player.Name, owner_player.UserId, descendant.Name), nil, true)
+                                local bot_hrp = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart")
+                                local other_hrp = owner_player.Character and FindFirstChild(owner_player.Character, "HumanoidRootPart")
+                                local dist = (bot_hrp and other_hrp) and (bot_hrp.Position - other_hrp.Position).Magnitude or 0
+
+                                if dist <= 500 or not bot_hrp then
+                                    library:Notify(string.format("Player %s has %s (%.0f studs) - instant serverhop!", owner_player.Name, descendant.Name, dist))
+                                    trinket_bot.path_running = false
+                                    TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop", owner_player.Name, owner_player.UserId, descendant.Name), nil, true)
+                                end
                             elseif not owner_player then
                                 library:Notify(string.format("Dangerous item %s detected in server - instant serverhop!", descendant.Name))
                                 trinket_bot.path_running = false
                                 TrinketBotServerhop(string.format("Dangerous item %s detected in server - instant serverhop (no owner identified)", descendant.Name), nil, true)
                             end
                         end
+                    end))
+
+                    -- also scan backpacks for items like Fimbulvetr/Armis that stay in backpack
+                    local emergency_backpack_connection = track_connection("emergency_backpack", utility:Connection(plrs.PlayerAdded, function(player)
+                        if not trinket_bot.path_running then return end
+                        local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
+                        if stay_in_server then return end
+
+                        task.spawn(function()
+                            local backpack = player:WaitForChild("Backpack", 10)
+                            if not backpack then return end
+                            task.wait(1)
+
+                            if not trinket_bot.path_running then return end
+
+                            local bot_hrp = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart")
+                            local other_hrp = player.Character and FindFirstChild(player.Character, "HumanoidRootPart")
+                            local dist = (bot_hrp and other_hrp) and (bot_hrp.Position - other_hrp.Position).Magnitude or 0
+
+                            if dist <= 500 or not bot_hrp then
+                                for _, tool in next, backpack:GetChildren() do
+                                    if tool:IsA("Tool") and emergency_conditions[tool.Name] then
+                                        library:Notify(string.format("Player %s joined with %s in backpack (%.0f studs) - instant serverhop!", player.Name, tool.Name, dist))
+                                        trinket_bot.path_running = false
+                                        TrinketBotServerhop(string.format("Player %s (%s) joined with %s in backpack - instant serverhop", player.Name, player.UserId, tool.Name), nil, true)
+                                        return
+                                    end
+                                end
+                            end
+                        end)
                     end))
                 end
 
@@ -17097,10 +17155,10 @@ end
 
             group_trinket_bot:AddDropdown("EmergencyServerhopConditions", {
                 Text = "Emergency Serverhop Conditions",
-                Tooltip = "Select items that trigger instant serverhop when equipped by another player (no emergency gate)",
-                Values = {"Perflora", "Pebble", "Celeritas"},
+                Tooltip = "Select items that trigger instant serverhop when detected on another player within 500 studs",
+                Values = {"Perflora", "Pebble", "Celeritas", "Fimbulvetr", "Dagger Throw", "Armis"},
                 Multi = true,
-                Default = {"Perflora", "Pebble", "Celeritas"},
+                Default = {"Perflora", "Pebble", "Celeritas", "Fimbulvetr", "Dagger Throw", "Armis"},
                 Compact = true
             })
 
