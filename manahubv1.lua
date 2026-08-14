@@ -14479,7 +14479,7 @@ end
                 end
 
                 do
-                    local SUDDEN_TELEPORT_DISTANCE = 200
+                    local SUDDEN_TELEPORT_DISTANCE = 70
                     local last_known_position = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") and plr.Character.HumanoidRootPart.Position
                     local teleport_kick_triggered = false
 
@@ -14495,6 +14495,12 @@ end
                         local hrp = character and FindFirstChild(character, "HumanoidRootPart")
                         if not hrp then
                             last_known_position = nil
+                            return
+                        end
+
+                        -- combat can legitimately reposition you (grapple, knockback) - don't flag those
+                        if cs:HasTag(character, "Danger") then
+                            last_known_position = hrp.Position
                             return
                         end
 
