@@ -17273,9 +17273,9 @@ end
             group_trinket_bot:AddDropdown("DangerousSpellsInRange", {
                 Text = "Dangerous Spells (600 studs)",
                 Tooltip = "Serverhop if another player has these in backpack/character within 600 studs",
-                Values = {"Fimbulvetr", "Dagger Throw", "Armis"},
+                Values = {"Fimbulvetr", "Dagger Throw", "Armis", "Opal Shard"},
                 Multi = true,
-                Default = {"Fimbulvetr", "Dagger Throw", "Armis"},
+                Default = {"Fimbulvetr", "Dagger Throw", "Armis", "Opal Shard"},
                 Compact = true
             })
 
