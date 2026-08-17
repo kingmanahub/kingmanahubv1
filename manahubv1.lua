@@ -12174,7 +12174,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             local collected_trinket_ids = {}
             local COLLECTED_IDS_MAX_SIZE = 500
             local pending_pickup_ids = trinket_bot.pending_pickup_ids
-            local active_tween_data = {tween = nil, connection = nil}
+            local active_tween_data = {tween = nil, connection = nil, target_position = nil}
 
             local function mark_trinket_collected(trinket_id_value)
                 local count = 0
@@ -12633,6 +12633,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
 
                 active_tween_data.tween = tween
                 active_tween_data.connection = connection
+                active_tween_data.target_position = targetPosition
 
                 tween:Play()
 
@@ -12683,6 +12684,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
 
                 active_tween_data.tween = nil
                 active_tween_data.connection = nil
+                active_tween_data.target_position = nil
             end
 
             local function getPing()
@@ -12766,6 +12768,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     active_tween_data.connection:Disconnect()
                     active_tween_data.connection = nil
                 end
+                active_tween_data.target_position = nil
 
                 if plr.Character then
                     local humanoid = FindFirstChildOfClass(plr.Character, "Humanoid")
@@ -12983,10 +12986,34 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                                 end
 
                                 library:Notify(string.format("Successfully gated to %s (%.0f studs from destination)", where, distance_to_destination))
+
+                                -- re-equip held weapon after gate
+                                local hold_weapon = Options.HoldWeaponWhileBotting and Options.HoldWeaponWhileBotting.Value or "None"
+                                if hold_weapon ~= "None" then
+                                    task.wait(0.2)
+                                    local weapon = FindFirstChild(plr.Backpack, hold_weapon)
+                                    if weapon then
+                                        local hum = FindFirstChildOfClass(plr.Character, "Humanoid")
+                                        if hum then hum:EquipTool(weapon) end
+                                    end
+                                end
+
                                 return true
                             end
 
                             library:Notify(string.format("Successfully gated to %s", where))
+
+                            -- re-equip held weapon after gate
+                            local hold_weapon = Options.HoldWeaponWhileBotting and Options.HoldWeaponWhileBotting.Value or "None"
+                            if hold_weapon ~= "None" then
+                                task.wait(0.2)
+                                local weapon = FindFirstChild(plr.Backpack, hold_weapon)
+                                if weapon then
+                                    local hum = FindFirstChildOfClass(plr.Character, "Humanoid")
+                                    if hum then hum:EquipTool(weapon) end
+                                end
+                            end
+
                             return true
                         else
                             warn("Character lost during gate verification")
@@ -13311,6 +13338,7 @@ end
                     kick_trinket_list = Options.KickTrinketList and Options.KickTrinketList.Value or {},
                     stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false,
                     reequip_gate_in_loop = Toggles.ReequipGateInLoop == nil and true or Toggles.ReequipGateInLoop.Value,
+                    hold_weapon_while_botting = Options.HoldWeaponWhileBotting and Options.HoldWeaponWhileBotting.Value or "None",
                     time_between_looting = Options.TimeBetweenLooting and Options.TimeBetweenLooting.Value or 5,
                     proximity_check = Options.ProximityCheck and Options.ProximityCheck.Value or 0,
                     critical_distance = Options.CriticalDistance and Options.CriticalDistance.Value or 60,
@@ -14258,7 +14286,7 @@ end
                     end))
                 end
 
-                -- Dangerous Spells in Range (500 studs) - separate from emergency conditions
+                -- Dangerous Spells in Range (600 studs) - separate from emergency conditions
                 local dangerous_spells = Options.DangerousSpellsInRange and Options.DangerousSpellsInRange.Value or {}
                 if next(dangerous_spells) ~= nil then
                     local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
@@ -14271,7 +14299,7 @@ end
                                     local other_hrp = other_player.Character and FindFirstChild(other_player.Character, "HumanoidRootPart")
                                     local dist = other_hrp and (bot_hrp.Position - other_hrp.Position).Magnitude or 9999
 
-                                    if dist <= 500 then
+                                    if dist <= 600 then
                                         local containers = {}
                                         if other_player.Character then table.insert(containers, other_player.Character) end
                                         local bp = FindFirstChild(other_player, "Backpack")
@@ -14305,7 +14333,7 @@ end
                         for _, other_player in next, plrs:GetPlayers() do
                             if other_player ~= plr then
                                 local other_hrp = other_player.Character and FindFirstChild(other_player.Character, "HumanoidRootPart")
-                                if other_hrp and (bot_hrp.Position - other_hrp.Position).Magnitude <= 500 then
+                                if other_hrp and (bot_hrp.Position - other_hrp.Position).Magnitude <= 600 then
                                     local containers = {}
                                     if other_player.Character then table.insert(containers, other_player.Character) end
                                     local bp = FindFirstChild(other_player, "Backpack")
@@ -14327,6 +14355,38 @@ end
                         end
                     end)))
                 end
+
+                -- Combat proximity kick: if in Danger and player within 400 studs → kick
+                track_connection("combat_proximity_kick", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
+                    if not trinket_bot.path_running then return end
+
+                    local character = plr.Character
+                    if not character then return end
+                    if not cs:HasTag(character, "Danger") then return end
+
+                    local bot_hrp = FindFirstChild(character, "HumanoidRootPart")
+                    if not bot_hrp then return end
+
+                    for _, other_player in next, plrs:GetPlayers() do
+                        if other_player ~= plr then
+                            local other_hrp = other_player.Character and FindFirstChild(other_player.Character, "HumanoidRootPart")
+                            if other_hrp then
+                                local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
+                                if dist <= 400 then
+                                    trinket_bot.path_running = false
+                                    local message = string.format("In combat with player %s within %.0f studs - kicking for safety", other_player.Name, dist)
+                                    library:Notify(message)
+                                    if utility then
+                                        utility:plain_webhook(string.format("@here %s", message))
+                                    end
+                                    task.wait(0.5)
+                                    plr:Kick(message)
+                                    return
+                                end
+                            end
+                        end
+                    end
+                end)))
 
                 local function get_proximity_distance()
                     return Options.ProximityCheck and Options.ProximityCheck.Value or 0
@@ -14479,13 +14539,16 @@ end
                 end
 
                 do
-                    local SUDDEN_TELEPORT_DISTANCE = 70
+                    local RUBBERBAND_DISTANCE = 70
                     local last_known_position = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") and plr.Character.HumanoidRootPart.Position
                     local teleport_kick_triggered = false
+                    local rubberband_strike_count = 0
+                    local RUBBERBAND_STRIKES_NEEDED = 3
 
                     track_connection("sudden_teleport_watch", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
                         if not (Toggles and Toggles.KickOnRubberband and Toggles.KickOnRubberband.Value) then
                             last_known_position = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") and plr.Character.HumanoidRootPart.Position
+                            rubberband_strike_count = 0
                             return
                         end
 
@@ -14495,12 +14558,13 @@ end
                         local hrp = character and FindFirstChild(character, "HumanoidRootPart")
                         if not hrp then
                             last_known_position = nil
+                            rubberband_strike_count = 0
                             return
                         end
 
-                        -- combat can legitimately reposition you (grapple, knockback) - don't flag those
-                        if cs:HasTag(character, "Danger") then
+                        if cs:HasTag(character, "Danger") or FindFirstChild(character, "Stun") or FindFirstChild(character, "NoControl") then
                             last_known_position = hrp.Position
+                            rubberband_strike_count = 0
                             return
                         end
 
@@ -14510,19 +14574,33 @@ end
                             local jump_distance = (current_position - last_known_position).Magnitude
                             local within_expected_window = tick() < (trinket_bot.expected_teleport_until or 0)
 
-                            if jump_distance > SUDDEN_TELEPORT_DISTANCE and not within_expected_window then
-                                teleport_kick_triggered = true
-                                trinket_bot.path_running = false
-
-                                local message = string.format("Rubberband/sudden teleport detected (%.0f studs) - path conflict, kicking (Kick on Rubberband enabled)", jump_distance)
-                                library:Notify(message)
-                                if utility then
-                                    utility:plain_webhook(string.format("@here %s", message))
+                            if jump_distance > RUBBERBAND_DISTANCE and not within_expected_window then
+                                local is_going_backwards = false
+                                if active_tween_data.tween and active_tween_data.target_position then
+                                    local old_dist = (last_known_position - active_tween_data.target_position).Magnitude
+                                    local new_dist = (current_position - active_tween_data.target_position).Magnitude
+                                    is_going_backwards = new_dist > old_dist + 10
                                 end
 
-                                task.wait(0.5)
-                                plr:Kick(message)
-                                return
+                                if is_going_backwards or not active_tween_data.tween then
+                                    rubberband_strike_count = rubberband_strike_count + 1
+                                    if rubberband_strike_count >= RUBBERBAND_STRIKES_NEEDED then
+                                        teleport_kick_triggered = true
+                                        trinket_bot.path_running = false
+                                        local message = string.format("Rubberband detected (%.0f studs, %d strikes, backwards=%s) - kicking", jump_distance, rubberband_strike_count, tostring(is_going_backwards))
+                                        library:Notify(message)
+                                        if utility then
+                                            utility:plain_webhook(string.format("@here %s", message))
+                                        end
+                                        task.wait(0.5)
+                                        plr:Kick(message)
+                                        return
+                                    end
+                                else
+                                    rubberband_strike_count = 0
+                                end
+                            else
+                                rubberband_strike_count = 0
                             end
                         end
 
@@ -14723,7 +14801,17 @@ end
 
                     if currently_dropping then return end
 
-                    if Toggles.ReequipGateInLoop and Toggles.ReequipGateInLoop.Value then
+                    local hold_weapon = Options.HoldWeaponWhileBotting and Options.HoldWeaponWhileBotting.Value or "None"
+                    if hold_weapon ~= "None" then
+                        local weapon_in_backpack = FindFirstChild(plr.Backpack, hold_weapon)
+                        local weapon_equipped = FindFirstChild(plr.Character, hold_weapon)
+                        if weapon_in_backpack and not weapon_equipped then
+                            local humanoid = FindFirstChildOfClass(plr.Character, "Humanoid")
+                            if humanoid then
+                                humanoid:EquipTool(weapon_in_backpack)
+                            end
+                        end
+                    elseif Toggles.ReequipGateInLoop and Toggles.ReequipGateInLoop.Value then
                         local gate_in_backpack = FindFirstChild(plr.Backpack, "Gate")
                         local gate_equipped = FindFirstChild(plr.Character, "Gate")
                         if gate_in_backpack and not gate_equipped then
@@ -17182,8 +17270,8 @@ end
             })
 
             group_trinket_bot:AddDropdown("DangerousSpellsInRange", {
-                Text = "Dangerous Spells (500 studs)",
-                Tooltip = "Serverhop if another player has these in backpack/character within 500 studs",
+                Text = "Dangerous Spells (600 studs)",
+                Tooltip = "Serverhop if another player has these in backpack/character within 600 studs",
                 Values = {"Fimbulvetr", "Dagger Throw", "Armis"},
                 Multi = true,
                 Default = {"Fimbulvetr", "Dagger Throw", "Armis"},
@@ -17391,6 +17479,7 @@ end
                 if Options.KickTrinketList then Options.KickTrinketList:SetValue(settings.kick_trinket_list or {}) end
                 if Toggles.StayInServer then Toggles.StayInServer:SetValue(settings.stay_in_server or false) end
                 if Toggles.ReequipGateInLoop then Toggles.ReequipGateInLoop:SetValue(settings.reequip_gate_in_loop == nil and true or settings.reequip_gate_in_loop) end
+                if Options.HoldWeaponWhileBotting then Options.HoldWeaponWhileBotting:SetValue(settings.hold_weapon_while_botting or "None") end
                 if Options.TimeBetweenLooting then Options.TimeBetweenLooting:SetValue(settings.time_between_looting or 5) end
                 if Options.ProximityCheck then Options.ProximityCheck:SetValue(settings.proximity_check or 0) end
                 if Options.CriticalDistance then Options.CriticalDistance:SetValue(settings.critical_distance or 60) end
@@ -18381,6 +18470,7 @@ end
                             kick_trinket_list = Options.KickTrinketList and Options.KickTrinketList.Value or {},
                             stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false,
                             reequip_gate_in_loop = Toggles.ReequipGateInLoop == nil and true or Toggles.ReequipGateInLoop.Value,
+                    hold_weapon_while_botting = Options.HoldWeaponWhileBotting and Options.HoldWeaponWhileBotting.Value or "None",
                             time_between_looting = Options.TimeBetweenLooting and Options.TimeBetweenLooting.Value or 5,
                             proximity_check = Options.ProximityCheck and Options.ProximityCheck.Value or 0,
                             critical_distance = Options.CriticalDistance and Options.CriticalDistance.Value or 60,
@@ -18633,6 +18723,13 @@ end
                 Text = "Re-equip Gate in Loop",
                 Default = cheat_client.config.reequip_gate_in_loop,
                 Tooltip = "Automatically re-equip gate tool if it gets unequipped during botting"
+            })
+
+            group_trinket_looping:AddDropdown("HoldWeaponWhileBotting", {
+                Text = "Hold Weapon While Botting",
+                Values = {"None", "Perflora", "Pebble"},
+                Default = "None",
+                Tooltip = "Auto-equip selected weapon while botting. Switches to Gate near gate points then back. Overrides Re-equip Gate when active."
             })
 
             group_trinket_looping:AddSlider("TimeBetweenLooting", {
