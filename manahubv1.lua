@@ -14356,7 +14356,7 @@ end
                     end)))
                 end
 
-                -- Combat proximity kick: if in Danger and player within 400 studs → kick
+                -- Combat proximity kick: if in Danger and player within 450 studs → kick
                 track_connection("combat_proximity_kick", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
                     if not trinket_bot.path_running then return end
 
@@ -14372,7 +14372,7 @@ end
                             local other_hrp = other_player.Character and FindFirstChild(other_player.Character, "HumanoidRootPart")
                             if other_hrp then
                                 local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
-                                if dist <= 400 then
+                                if dist <= 450 then
                                     trinket_bot.path_running = false
                                     local message = string.format("In combat with player %s within %.0f studs - kicking for safety", other_player.Name, dist)
                                     library:Notify(message)
