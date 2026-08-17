@@ -14356,13 +14356,15 @@ end
                     end)))
                 end
 
-                -- Combat proximity kick: if in Danger and player within 450 studs → kick
+                -- Combat proximity kick: if in Danger (any source) and player within 450 studs → kick immediately
                 track_connection("combat_proximity_kick", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
                     if not trinket_bot.path_running then return end
 
                     local character = plr.Character
                     if not character then return end
-                    if not cs:HasTag(character, "Danger") then return end
+
+                    local in_danger = cs:HasTag(character, "Danger") or FindFirstChild(character, "Danger")
+                    if not in_danger then return end
 
                     local bot_hrp = FindFirstChild(character, "HumanoidRootPart")
                     if not bot_hrp then return end
@@ -14374,12 +14376,11 @@ end
                                 local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
                                 if dist <= 450 then
                                     trinket_bot.path_running = false
-                                    local message = string.format("In combat with player %s within %.0f studs - kicking for safety", other_player.Name, dist)
+                                    local message = string.format("In combat + player %s within %.0f studs - combat log kick", other_player.Name, dist)
                                     library:Notify(message)
-                                    if utility then
+                                    pcall(function()
                                         utility:plain_webhook(string.format("@here %s", message))
-                                    end
-                                    task.wait(0.5)
+                                    end)
                                     plr:Kick(message)
                                     return
                                 end
