@@ -18919,7 +18919,8 @@ end
                     if character and character:FindFirstChild("Humanoid") then
                         local is_scroll = item.Name:lower():find("scroll of") ~= nil
                         local is_ice_essence = item.Name == "Ice Essence"
-                        local should_try_use = is_scroll or is_ice_essence
+                        local is_pop_only = (item.Name == "Scroll of Telorum" or item.Name == "Scroll of Trahere")
+                        local should_try_use = is_scroll or is_ice_essence or is_pop_only
 
                         local equip_success = pcall(function()
                             character.Humanoid:EquipTool(item)
@@ -18946,21 +18947,63 @@ end
                         end
 
                         if should_try_use then
-                            library:Notify(string.format("Attempting to use %s before dropping...", item.Name))
+                            library:Notify(string.format("Attempting to use %s...", item.Name))
                             task.wait(0.1)
 
-                            task.spawn(function()
-                                if vim then
-                                    vim:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-                                    task.wait(math.random(1, 15) / 1000)
-                                    vim:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-                                end
-                            end)
+                            local function use_equipped_item()
+                                task.spawn(function()
+                                    if vim then
+                                        vim:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+                                        task.wait(math.random(1, 15) / 1000)
+                                        vim:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+                                    end
+                                end)
 
-                            if utility and utility.LeftClick then
-                                utility:LeftClick()
+                                if utility and utility.LeftClick then
+                                    utility:LeftClick()
+                                end
                             end
 
+                            if is_pop_only then
+                                -- loop activate until item is consumed (pop only, never drop)
+                                while item and item.Parent and (item.Parent == character or item.Parent == plr.Backpack) do
+                                    if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then
+                                        break
+                                    end
+
+                                    character = plr.Character
+                                    if not character or not character:FindFirstChild("Humanoid") then
+                                        break
+                                    end
+
+                                    if item.Parent == plr.Backpack then
+                                        pcall(function()
+                                            character.Humanoid:EquipTool(item)
+                                        end)
+                                        local equip_start = tick()
+                                        while item.Parent ~= character and item.Parent == plr.Backpack and (tick() - equip_start) < 3 do
+                                            task.wait(0.1)
+                                        end
+                                    end
+
+                                    if item.Parent ~= character then
+                                        break
+                                    end
+
+                                    use_equipped_item()
+                                    task.wait(0.45)
+                                end
+
+                                if not item or not item.Parent or (item.Parent ~= character and item.Parent ~= plr.Backpack) then
+                                    library:Notify(string.format("Popped all %s", item.Name))
+                                end
+
+                                droppedTools[item.Name] = nil
+                                currently_dropping = false
+                                return
+                            end
+
+                            use_equipped_item()
                             task.wait(0.5)
 
                             if not item or not item.Parent or (item.Parent ~= character and item.Parent ~= plr.Backpack) then
