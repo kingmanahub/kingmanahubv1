@@ -18919,7 +18919,7 @@ end
                     if character and character:FindFirstChild("Humanoid") then
                         local is_scroll = item.Name:lower():find("scroll of") ~= nil
                         local is_ice_essence = item.Name == "Ice Essence"
-                        local is_pop_only = (item.Name == "Scroll of Telorum" or item.Name == "Scroll of Trahere")
+                        local is_pop_only = (item.Name == "Scroll of Telorum" or item.Name == "Scroll of Trahere" or item.Name == "Ice Essence")
                         local should_try_use = is_scroll or is_ice_essence or is_pop_only
 
                         local equip_success = pcall(function()
