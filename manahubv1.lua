@@ -12586,8 +12586,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 local current_position = root.Position
                 local distance = (targetPosition - current_position).Magnitude
 
-                -- Smooth tweening is normal bot movement, not an expected instant teleport.
-                -- Only real teleports such as Gate should suppress rubberband detection.
+                trinket_bot.expected_teleport_until = tick() + math.max(1.5, (distance / (Options.TrinketBotSpeed and Options.TrinketBotSpeed.Value or 100)) + 1)
 
                 if distance > 1500 then
                     library:Notify(string.format("!! Attempted teleport of %.0f studs! Stopping path... (if this is a bug DM work at a pizza place bot)", distance))
@@ -14357,7 +14356,7 @@ end
                     end)))
                 end
 
-                -- Combat proximity kick: if in Danger (any source) and player within 450 studs → kick immediately
+                -- STRICT: in combat (Danger tag) + player within 450 studs = instant kick, no delay
                 track_connection("combat_proximity_kick", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
                     if not trinket_bot.path_running then return end
 
@@ -14377,12 +14376,17 @@ end
                                 local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
                                 if dist <= 450 then
                                     trinket_bot.path_running = false
-                                    local message = string.format("In combat + player %s within %.0f studs - combat log kick", other_player.Name, dist)
-                                    library:Notify(message)
-                                    pcall(function()
-                                        utility:plain_webhook(string.format("@here %s", message))
-                                    end)
+                                    local message = string.format("In combat + player %s within %.0f studs - COMBAT LOG", other_player.Name, dist)
+
+                                    -- kick FIRST, immediately, nothing blocks this
                                     plr:Kick(message)
+
+                                    -- fire notify/webhook after (non-blocking, best effort)
+                                    task.spawn(function()
+                                        pcall(function() library:Notify(message) end)
+                                        pcall(function() utility:plain_webhook(string.format("@here %s", message)) end)
+                                    end)
+
                                     return
                                 end
                             end
@@ -14541,16 +14545,16 @@ end
                 end
 
                 do
-                    -- A rubberband is normally one server correction in one frame, so waiting
-                    -- for three consecutive 70-stud jumps causes almost every real event to be missed.
-                    local RUBBERBAND_BACKWARD_DISTANCE = 20
-                    local RUBBERBAND_SNAP_DISTANCE = 35
+                    local RUBBERBAND_DISTANCE = 70
                     local last_known_position = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") and plr.Character.HumanoidRootPart.Position
                     local teleport_kick_triggered = false
+                    local rubberband_strike_count = 0
+                    local RUBBERBAND_STRIKES_NEEDED = 3
 
                     track_connection("sudden_teleport_watch", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
                         if not (Toggles and Toggles.KickOnRubberband and Toggles.KickOnRubberband.Value) then
                             last_known_position = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") and plr.Character.HumanoidRootPart.Position
+                            rubberband_strike_count = 0
                             return
                         end
 
@@ -14560,11 +14564,13 @@ end
                         local hrp = character and FindFirstChild(character, "HumanoidRootPart")
                         if not hrp then
                             last_known_position = nil
+                            rubberband_strike_count = 0
                             return
                         end
 
                         if cs:HasTag(character, "Danger") or FindFirstChild(character, "Stun") or FindFirstChild(character, "NoControl") then
                             last_known_position = hrp.Position
+                            rubberband_strike_count = 0
                             return
                         end
 
@@ -14573,41 +14579,34 @@ end
                         if last_known_position then
                             local jump_distance = (current_position - last_known_position).Magnitude
                             local within_expected_window = tick() < (trinket_bot.expected_teleport_until or 0)
-                            local has_active_tween = active_tween_data.tween and active_tween_data.target_position
-                            local backward_distance = 0
-                            local is_rubberband = false
 
-                            if not within_expected_window then
-                                if has_active_tween then
+                            if jump_distance > RUBBERBAND_DISTANCE and not within_expected_window then
+                                local is_going_backwards = false
+                                if active_tween_data.tween and active_tween_data.target_position then
                                     local old_dist = (last_known_position - active_tween_data.target_position).Magnitude
                                     local new_dist = (current_position - active_tween_data.target_position).Magnitude
-                                    backward_distance = new_dist - old_dist
+                                    is_going_backwards = new_dist > old_dist + 10
+                                end
 
-                                    -- During a tween, only a clear snap away from the target counts.
-                                    is_rubberband = backward_distance >= RUBBERBAND_BACKWARD_DISTANCE
-                                        and jump_distance >= RUBBERBAND_BACKWARD_DISTANCE
+                                if is_going_backwards or not active_tween_data.tween then
+                                    rubberband_strike_count = rubberband_strike_count + 1
+                                    if rubberband_strike_count >= RUBBERBAND_STRIKES_NEEDED then
+                                        teleport_kick_triggered = true
+                                        trinket_bot.path_running = false
+                                        local message = string.format("Rubberband detected (%.0f studs, %d strikes, backwards=%s) - kicking", jump_distance, rubberband_strike_count, tostring(is_going_backwards))
+                                        library:Notify(message)
+                                        if utility then
+                                            utility:plain_webhook(string.format("@here %s", message))
+                                        end
+                                        task.wait(0.5)
+                                        plr:Kick(message)
+                                        return
+                                    end
                                 else
-                                    -- Between tween segments there is no target direction to compare,
-                                    -- so require a slightly larger one-frame snap.
-                                    is_rubberband = jump_distance >= RUBBERBAND_SNAP_DISTANCE
+                                    rubberband_strike_count = 0
                                 end
-                            end
-
-                            if is_rubberband then
-                                teleport_kick_triggered = true
-                                trinket_bot.path_running = false
-                                local message = string.format(
-                                    "Rubberband detected (snap %.0f studs, backwards %.0f studs) - kicking",
-                                    jump_distance,
-                                    math.max(backward_distance, 0)
-                                )
-                                library:Notify(message)
-                                if utility then
-                                    utility:plain_webhook(string.format("@here %s", message))
-                                end
-                                task.wait(0.15)
-                                plr:Kick(message)
-                                return
+                            else
+                                rubberband_strike_count = 0
                             end
                         end
 
