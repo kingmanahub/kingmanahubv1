@@ -12165,7 +12165,9 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 moderator_detected = false,
                 pending_artifact_logs = {},
                 pending_pickup_ids = {},
-                expected_teleport_until = 0
+                expected_teleport_until = 0,
+                hop_in_progress = false,
+                stuck_since = 0
             }
 
             cheat_client.trinket_bot = trinket_bot
@@ -13281,7 +13283,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
 end
 
             local teleport_debounce = false
-            local function TrinketBotServerhop(reason, skip_test_mode_check, prefer_empty)
+            local function TrinketBotServerhop_Impl(reason, skip_test_mode_check, prefer_empty)
                 if not skip_test_mode_check and trinket_bot.test_mode then
                     library:Notify(string.format("Serverhop blocked (test mode): %s", reason or "Unknown"))
                     return
@@ -13630,6 +13632,31 @@ end
                             task.wait(0.5)
                             plr:Kick("Serverhop completely failed - all retries exhausted")
                         end
+                    end
+                end
+            end
+
+            local function TrinketBotServerhop(reason, skip_test_mode_check, prefer_empty)
+                trinket_bot.hop_in_progress = true
+                local ok, err = pcall(function()
+                    TrinketBotServerhop_Impl(reason, skip_test_mode_check, prefer_empty)
+                end)
+                trinket_bot.hop_in_progress = false
+
+                if not ok then
+                    warn("[TRINKETBOT SERVERHOP] Unhandled error: " .. tostring(err))
+                    pcall(function()
+                        utility:plain_webhook(string.format("@here TrinketBotServerhop crashed: %s - forcing retry", tostring(err)))
+                    end)
+                    task.wait(1)
+                    -- retry once more directly through utility, bypass wrapper logic entirely
+                    local retry_ok = pcall(function()
+                        utility:Serverhop(prefer_empty)
+                    end)
+                    if not retry_ok then
+                        warn("[TRINKETBOT SERVERHOP] Fallback retry also failed - kicking")
+                        task.wait(0.5)
+                        plr:Kick("Serverhop crashed and fallback failed - kicking for safety")
                     end
                 end
             end
@@ -14357,8 +14384,9 @@ end
                 end
 
                 -- STRICT: in combat (Danger tag) + player within 450 studs = instant kick, no delay
+                -- uses botstarted (not path_running) so it stays active even mid-serverhop transition
                 track_connection("combat_proximity_kick", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
-                    if not trinket_bot.path_running then return end
+                    if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then return end
 
                     local character = plr.Character
                     if not character then return end
@@ -14393,6 +14421,50 @@ end
                         end
                     end
                 end)))
+
+                -- Watchdog: bot stuck at menu (path stopped, no hop in progress) for too long -> force hop, then kick
+                do
+                    local stuck_timer_start = nil
+                    local forced_retry_count = 0
+                    track_connection("stuck_menu_watchdog", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
+                        if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then
+                            stuck_timer_start = nil
+                            forced_retry_count = 0
+                            return
+                        end
+
+                        if trinket_bot.path_running or trinket_bot.hop_in_progress then
+                            stuck_timer_start = nil
+                            forced_retry_count = 0
+                            return
+                        end
+
+                        if not stuck_timer_start then
+                            stuck_timer_start = tick()
+                            return
+                        end
+
+                        local stuck_duration = tick() - stuck_timer_start
+
+                        if stuck_duration > 15 and forced_retry_count < 2 then
+                            forced_retry_count = forced_retry_count + 1
+                            stuck_timer_start = tick()
+                            warn(string.format("[WATCHDOG] Bot stuck at menu for 15s+ (attempt %d/2) - forcing serverhop", forced_retry_count))
+                            pcall(function()
+                                utility:plain_webhook(string.format("@here WATCHDOG: Bot stuck at menu 15s+ - forcing serverhop (attempt %d/2)", forced_retry_count))
+                            end)
+                            task.spawn(function()
+                                TrinketBotServerhop("Watchdog: recovered from stuck menu state", true, true)
+                            end)
+                        elseif stuck_duration > 15 and forced_retry_count >= 2 then
+                            warn("[WATCHDOG] Bot still stuck after 2 forced hop attempts - kicking")
+                            pcall(function()
+                                utility:plain_webhook("@here WATCHDOG: Bot still stuck after 2 forced hops - kicking")
+                            end)
+                            plr:Kick("Watchdog: stuck at menu after repeated forced serverhop attempts")
+                        end
+                    end)))
+                end
 
                 local function get_proximity_distance()
                     return Options.ProximityCheck and Options.ProximityCheck.Value or 0
