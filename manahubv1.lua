@@ -16778,13 +16778,39 @@ end
                         ExecutePath(false)
                     else
                         library:Notify("Path completed! Serverhopping...")
+                        warn("[TRINKETBOT] Path completed - calling TrinketBotServerhop")
                         task.wait(0.5)
+
+                        local hop_reason
                         if not critical_serverhop_sent then
-                            TrinketBotServerhop("Server farmed, serverhopping")
+                            hop_reason = "Server farmed, serverhopping"
                         else
-                            TrinketBotServerhop("Server farmed after critical event, serverhopping")
+                            hop_reason = "Server farmed after critical event, serverhopping"
                         end
+
                         trinket_bot.path_running = false
+
+                        local hop_ok, hop_err = pcall(function()
+                            TrinketBotServerhop(hop_reason)
+                        end)
+
+                        if not hop_ok then
+                            warn("[TRINKETBOT] Path completion serverhop FAILED: " .. tostring(hop_err))
+                            pcall(function()
+                                utility:plain_webhook(string.format("@here Path completion serverhop failed: %s - forcing retry", tostring(hop_err)))
+                            end)
+                            task.wait(1)
+                            -- force retry directly
+                            for i = 1, 5 do
+                                pcall(function() rps.Requests.ReturnToMenu:InvokeServer() end)
+                                task.wait(0.05)
+                            end
+                            task.wait(0.3)
+                            local retry_ok = pcall(function() utility:Serverhop() end)
+                            if not retry_ok then
+                                plr:Kick("Path completion serverhop failed after retry - kicking")
+                            end
+                        end
                     end
                 else
                     trinket_bot.path_running = false
