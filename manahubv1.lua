@@ -632,7 +632,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             auto_bag = false,
             show_bag_range = false,
             bag_range = 80,
-            reequip_gate_in_loop = true,
+            reequip_gate_in_loop = false,
 
 
             temperature_lock = false,
@@ -12167,7 +12167,8 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 pending_pickup_ids = {},
                 expected_teleport_until = 0,
                 hop_in_progress = false,
-                stuck_since = 0
+                stuck_since = 0,
+                gate_in_progress = false
             }
 
             cheat_client.trinket_bot = trinket_bot
@@ -12791,9 +12792,22 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     return false
                 end
 
-                if FindFirstChild(plr.Backpack, "Gate") then
-                    plr.Character.Humanoid:EquipTool(plr.Backpack["Gate"])
-                    task.wait(0.3)
+                -- Do NOT equip Gate here. Keep HoldWeaponWhileBotting equipped while
+                -- waiting for SnapCool/Danger and while preparing mana. Gate is equipped
+                -- only immediately before the actual cast below.
+
+                local function restoreHeldWeapon()
+                    trinket_bot.gate_in_progress = false
+
+                    local hold_weapon = Options.HoldWeaponWhileBotting and Options.HoldWeaponWhileBotting.Value or "None"
+                    if hold_weapon ~= "None" and plr.Character and plr.Backpack then
+                        task.wait(0.2)
+                        local weapon = FindFirstChild(plr.Backpack, hold_weapon)
+                        local hum = FindFirstChildOfClass(plr.Character, "Humanoid")
+                        if weapon and hum then
+                            hum:EquipTool(weapon)
+                        end
+                    end
                 end
 
                 local CollectionService = Services.CollectionService
@@ -12957,6 +12971,31 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     end
                 end
 
+                -- We are at the gate point and mana is ready: temporarily stop the
+                -- Hold Weapon heartbeat, switch Pebble/Perflora -> Gate, then cast.
+                trinket_bot.gate_in_progress = true
+
+                local gate_humanoid = FindFirstChildOfClass(plr.Character, "Humanoid")
+                if not gate_humanoid then
+                    restoreHeldWeapon()
+                    warn("Humanoid not found before gate cast")
+                    return false
+                end
+
+                gate_humanoid:UnequipTools()
+                task.wait(0.05)
+
+                if gateTool.Parent == plr.Backpack then
+                    gate_humanoid:EquipTool(gateTool)
+                end
+                task.wait(0.3)
+
+                if gateTool.Parent ~= plr.Character then
+                    restoreHeldWeapon()
+                    warn("Failed to equip Gate before cast")
+                    return false
+                end
+
                 task.wait(0.05)
                 utility:RightClick()
                 task.wait(0.8)
@@ -12984,41 +13023,23 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
 
                                 if distance_to_destination > 700 then
                                     library:Notify(string.format("BACKFIRE detected (%.0f studs from expected destination)", distance_to_destination))
+                                    restoreHeldWeapon()
                                     return false
                                 end
 
                                 library:Notify(string.format("Successfully gated to %s (%.0f studs from destination)", where, distance_to_destination))
 
-                                -- re-equip held weapon after gate
-                                local hold_weapon = Options.HoldWeaponWhileBotting and Options.HoldWeaponWhileBotting.Value or "None"
-                                if hold_weapon ~= "None" then
-                                    task.wait(0.2)
-                                    local weapon = FindFirstChild(plr.Backpack, hold_weapon)
-                                    if weapon then
-                                        local hum = FindFirstChildOfClass(plr.Character, "Humanoid")
-                                        if hum then hum:EquipTool(weapon) end
-                                    end
-                                end
-
+                                restoreHeldWeapon()
                                 return true
                             end
 
                             library:Notify(string.format("Successfully gated to %s", where))
 
-                            -- re-equip held weapon after gate
-                            local hold_weapon = Options.HoldWeaponWhileBotting and Options.HoldWeaponWhileBotting.Value or "None"
-                            if hold_weapon ~= "None" then
-                                task.wait(0.2)
-                                local weapon = FindFirstChild(plr.Backpack, hold_weapon)
-                                if weapon then
-                                    local hum = FindFirstChildOfClass(plr.Character, "Humanoid")
-                                    if hum then hum:EquipTool(weapon) end
-                                end
-                            end
-
+                            restoreHeldWeapon()
                             return true
                         else
                             warn("Character lost during gate verification")
+                            restoreHeldWeapon()
                             return false
                         end
                     end
@@ -13026,6 +13047,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 end
 
                 warn("Gate teleportation failed: NoFall not found after 2.5s")
+                restoreHeldWeapon()
                 return false
             end
 
@@ -14879,23 +14901,27 @@ end
 
                     if currently_dropping then return end
 
-                    local hold_weapon = Options.HoldWeaponWhileBotting and Options.HoldWeaponWhileBotting.Value or "None"
-                    if hold_weapon ~= "None" then
-                        local weapon_in_backpack = FindFirstChild(plr.Backpack, hold_weapon)
-                        local weapon_equipped = FindFirstChild(plr.Character, hold_weapon)
-                        if weapon_in_backpack and not weapon_equipped then
-                            local humanoid = FindFirstChildOfClass(plr.Character, "Humanoid")
-                            if humanoid then
-                                humanoid:EquipTool(weapon_in_backpack)
+                    -- Hold Pebble/Perflora during normal bot movement, but never fight
+                    -- the Gate() function while it is performing a gate cast.
+                    if not trinket_bot.gate_in_progress then
+                        local hold_weapon = Options.HoldWeaponWhileBotting and Options.HoldWeaponWhileBotting.Value or "None"
+                        if hold_weapon ~= "None" then
+                            local weapon_in_backpack = FindFirstChild(plr.Backpack, hold_weapon)
+                            local weapon_equipped = FindFirstChild(plr.Character, hold_weapon)
+                            if weapon_in_backpack and not weapon_equipped then
+                                local humanoid = FindFirstChildOfClass(plr.Character, "Humanoid")
+                                if humanoid then
+                                    humanoid:EquipTool(weapon_in_backpack)
+                                end
                             end
-                        end
-                    elseif Toggles.ReequipGateInLoop and Toggles.ReequipGateInLoop.Value then
-                        local gate_in_backpack = FindFirstChild(plr.Backpack, "Gate")
-                        local gate_equipped = FindFirstChild(plr.Character, "Gate")
-                        if gate_in_backpack and not gate_equipped then
-                            local humanoid = FindFirstChildOfClass(plr.Character, "Humanoid")
-                            if humanoid then
-                                humanoid:EquipTool(gate_in_backpack)
+                        elseif Toggles.ReequipGateInLoop and Toggles.ReequipGateInLoop.Value then
+                            local gate_in_backpack = FindFirstChild(plr.Backpack, "Gate")
+                            local gate_equipped = FindFirstChild(plr.Character, "Gate")
+                            if gate_in_backpack and not gate_equipped then
+                                local humanoid = FindFirstChildOfClass(plr.Character, "Humanoid")
+                                if humanoid then
+                                    humanoid:EquipTool(gate_in_backpack)
+                                end
                             end
                         end
                     end
@@ -18825,7 +18851,7 @@ end
 
             group_trinket_looping:AddToggle("ReequipGateInLoop", {
                 Text = "Re-equip Gate in Loop",
-                Default = cheat_client.config.reequip_gate_in_loop,
+                Default = false,
                 Tooltip = "Automatically re-equip gate tool if it gets unequipped during botting"
             })
 
