@@ -12253,6 +12253,9 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             end
 
             local function restore_bot_state()
+                -- Clear any stale gate/hold lock when the bot is explicitly restored/stopped.
+                trinket_bot.gate_in_progress = false
+
                 if plr and plr.Character then
                     local character = plr.Character
                     local huma = FindFirstChildOfClass(character, "Humanoid")
@@ -12734,6 +12737,12 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     return false
                 end
 
+                -- HARD GATE LOCK:
+                -- Once the bot starts processing a Gate point, HoldWeaponWhileBotting must
+                -- stay disabled across every failed attempt/retry. It is unlocked ONLY after
+                -- the teleport is positively verified as successful.
+                trinket_bot.gate_in_progress = true
+
                 if currently_dropping then
                     library:Notify("Waiting for item drop to complete before gating...")
                     while currently_dropping and trinket_bot.path_running do
@@ -12760,6 +12769,15 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         if danger_cleared then
                             library:Notify("Danger cleared after item drop - proceeding with gate")
                         end
+                    end
+                end
+
+                -- The item-drop routine (if any) has finished. From this point until a
+                -- verified Gate success, do not keep Pebble/Perflora equipped.
+                if plr.Character then
+                    local entry_humanoid = FindFirstChildOfClass(plr.Character, "Humanoid")
+                    if entry_humanoid then
+                        entry_humanoid:UnequipTools()
                     end
                 end
 
@@ -12792,11 +12810,14 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     return false
                 end
 
-                -- Do NOT equip Gate here. Keep HoldWeaponWhileBotting equipped while
-                -- waiting for SnapCool/Danger and while preparing mana. Gate is equipped
-                -- only immediately before the actual cast below.
+                -- Hold Weapon is locked from this Gate point onward. Keep tools unequipped
+                -- while waiting for SnapCool/Danger and preparing mana; equip Gate only
+                -- immediately before the actual cast below.
 
-                local function restoreHeldWeapon()
+                local function unlockHeldWeaponAfterGateSuccess()
+                    -- IMPORTANT: call this ONLY after the gate teleport has been verified.
+                    -- Failed casts/backfires/timeouts intentionally leave gate_in_progress=true
+                    -- so the Heartbeat cannot re-equip Pebble/Perflora between retries.
                     trinket_bot.gate_in_progress = false
 
                     local hold_weapon = Options.HoldWeaponWhileBotting and Options.HoldWeaponWhileBotting.Value or "None"
@@ -12971,14 +12992,11 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     end
                 end
 
-                -- We are at the gate point and mana is ready: temporarily stop the
-                -- Hold Weapon heartbeat, switch Pebble/Perflora -> Gate, then cast.
-                trinket_bot.gate_in_progress = true
-
+                -- Gate lock is already active from the start of Gate(). Mana is ready now,
+                -- so equip Gate and perform the actual cast.
                 local gate_humanoid = FindFirstChildOfClass(plr.Character, "Humanoid")
                 if not gate_humanoid then
-                    restoreHeldWeapon()
-                    warn("Humanoid not found before gate cast")
+                    warn("Humanoid not found before gate cast - keeping Hold Weapon locked for retry")
                     return false
                 end
 
@@ -12991,8 +13009,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 task.wait(0.3)
 
                 if gateTool.Parent ~= plr.Character then
-                    restoreHeldWeapon()
-                    warn("Failed to equip Gate before cast")
+                    warn("Failed to equip Gate before cast - keeping Hold Weapon locked for retry")
                     return false
                 end
 
@@ -13022,32 +13039,29 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                                 local distance_to_destination = (post_gate_position - expected_destination).Magnitude
 
                                 if distance_to_destination > 700 then
-                                    library:Notify(string.format("BACKFIRE detected (%.0f studs from expected destination)", distance_to_destination))
-                                    restoreHeldWeapon()
+                                    library:Notify(string.format("BACKFIRE detected (%.0f studs from expected destination) - Hold Weapon remains locked; retrying Gate", distance_to_destination))
                                     return false
                                 end
 
-                                library:Notify(string.format("Successfully gated to %s (%.0f studs from destination)", where, distance_to_destination))
+                                library:Notify(string.format("Successfully gated to %s (%.0f studs from destination) - Hold Weapon unlocked", where, distance_to_destination))
 
-                                restoreHeldWeapon()
+                                unlockHeldWeaponAfterGateSuccess()
                                 return true
                             end
 
-                            library:Notify(string.format("Successfully gated to %s", where))
+                            library:Notify(string.format("Successfully gated to %s - Hold Weapon unlocked", where))
 
-                            restoreHeldWeapon()
+                            unlockHeldWeaponAfterGateSuccess()
                             return true
                         else
-                            warn("Character lost during gate verification")
-                            restoreHeldWeapon()
+                            warn("Character lost during gate verification - keeping Hold Weapon locked for retry")
                             return false
                         end
                     end
                     task.wait(0.1)
                 end
 
-                warn("Gate teleportation failed: NoFall not found after 2.5s")
-                restoreHeldWeapon()
+                warn("Gate teleportation failed: NoFall not found after 2.5s - keeping Hold Weapon locked for retry")
                 return false
             end
 
@@ -13305,6 +13319,57 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
 end
 
             local teleport_debounce = false
+
+            -- If Trinket Bot gets stuck in StartMenu for 30s after a hop, retry automatically.
+            local MENU_SERVERHOP_TIMEOUT = 30
+            local menu_serverhop_watchdog_token = 0
+
+            local function StartMenuServerhopWatchdog(prefer_empty)
+                menu_serverhop_watchdog_token = menu_serverhop_watchdog_token + 1
+                local my_token = menu_serverhop_watchdog_token
+                local starting_job_id = game.JobId
+
+                task.spawn(function()
+                    local menu_since = nil
+
+                    while shared and not shared.is_unloading
+                        and my_token == menu_serverhop_watchdog_token
+                        and game.JobId == starting_job_id do
+
+                        local player_gui = plr:FindFirstChild("PlayerGui")
+                        local start_menu = player_gui and FindFirstChild(player_gui, "StartMenu")
+
+                        if start_menu then
+                            if not menu_since then
+                                menu_since = tick()
+                            elseif tick() - menu_since >= MENU_SERVERHOP_TIMEOUT then
+                                -- Do not overlap the main TrinketBotServerhop attempt.
+                                if not trinket_bot.hop_in_progress then
+                                    library:Notify("Stuck in menu for 30s - retrying serverhop...")
+                                    warn("[SERVERHOP WATCHDOG] StartMenu active for 30s - retrying serverhop")
+
+                                    -- Reset before retry so another retry can happen after another 30s if needed.
+                                    menu_since = tick()
+
+                                    local ok, result = pcall(function()
+                                        return utility:Serverhop(prefer_empty)
+                                    end)
+
+                                    if not ok then
+                                        warn("[SERVERHOP WATCHDOG] Retry errored: " .. tostring(result))
+                                    end
+                                end
+                            end
+                        else
+                            -- Only count time actually spent in StartMenu.
+                            menu_since = nil
+                        end
+
+                        task.wait(0.5)
+                    end
+                end)
+            end
+
             local function TrinketBotServerhop_Impl(reason, skip_test_mode_check, prefer_empty)
                 if not skip_test_mode_check and trinket_bot.test_mode then
                     library:Notify(string.format("Serverhop blocked (test mode): %s", reason or "Unknown"))
@@ -13561,6 +13626,10 @@ end
                 end
 
                 local serverhop_success = false
+
+                -- Start a single watchdog for this hop. The timer only begins once StartMenu exists.
+                StartMenuServerhopWatchdog(prefer_empty)
+
                 -- spam menu before hopping
                 for i = 1, 5 do
                     pcall(function()
@@ -13960,6 +14029,8 @@ end
 
                 trinket_bot.path_running = true
                 trinket_bot.moderator_detected = false
+                -- Fresh path run: Hold Weapon is allowed until we actually enter a Gate point.
+                trinket_bot.gate_in_progress = false
 
                 if not plr.Character or not FindFirstChild(plr.Character, "HumanoidRootPart") then
                     trinket_bot.path_running = false
@@ -15857,12 +15928,13 @@ end
 
                                     library:Notify(string.format("Attempting gate %d/%d to %s", gate_index, #trinket_bot.path_points, gate_point.gate_location or "???"))
 
-                                    local max_retries = 3
                                     local retry_count = 0
 
                                     local retry_platform = nil
 
-                                    while not gate_success and retry_count < max_retries and trinket_bot.path_running and not emergency_gate_requested and not trinket_bot.moderator_detected do
+                                    -- Do not resume Hold Weapon or continue the path until Gate()
+                                    -- positively verifies arrival at the destination.
+                                    while not gate_success and trinket_bot.path_running and not emergency_gate_requested and not trinket_bot.moderator_detected do
                                         retry_count = retry_count + 1
 
                                         if not trinket_bot.path_running then
@@ -15870,7 +15942,7 @@ end
                                         end
 
                                         if retry_count > 1 then
-                                            library:Notify(string.format("Gate retry %d/%d for gate %d", retry_count, max_retries, gate_index))
+                                            library:Notify(string.format("Gate retry %d for gate %d (retrying until destination is confirmed)", retry_count, gate_index))
 
                                             local character = plr.Character
                                             if character then
@@ -15964,7 +16036,7 @@ end
                                         end
                                         break
                                     else
-                                        library:Notify(string.format("Gate %d failed after %d attempts - trying next gate", gate_index, retry_count))
+                                        library:Notify(string.format("Gate %d retry loop interrupted after %d attempts", gate_index, retry_count))
                                     end
                                 end
                             end
@@ -16003,10 +16075,9 @@ end
                                 return
                             end
                         else
-                            local max_retries = 999
                             local retry_count = 0
 
-                            while not gate_success and retry_count < max_retries and trinket_bot.path_running and not emergency_gate_requested and not trinket_bot.moderator_detected do
+                            while not gate_success and trinket_bot.path_running and not emergency_gate_requested and not trinket_bot.moderator_detected do
                                 retry_count = retry_count + 1
 
                                 if not trinket_bot.path_running then
@@ -16070,10 +16141,14 @@ end
                             end
 
                             if not gate_success then
-                                library:Notify("Gate failed but staying in server - continuing path")
+                                -- Infinite retry loop only exits here if the bot was stopped, an
+                                -- emergency gate was requested, or moderator handling took over.
+                                -- Never continue the normal path with an unverified Gate.
+                                library:Notify("Gate retry interrupted - normal path will NOT continue until a Gate succeeds")
                                 if utility then
-                                    utility:plain_webhook(string.format("@here Gate to %s repeatedly failing (stay in server mode)", point.gate_location or "???"))
+                                    utility:plain_webhook(string.format("@here Gate to %s was interrupted before success; path continuation blocked", point.gate_location or "???"))
                                 end
+                                return
                             else
                                 current_gate_section = current_gate_section + 1
                             end
