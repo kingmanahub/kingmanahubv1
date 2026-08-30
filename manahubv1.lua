@@ -12732,7 +12732,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 return LocationName
             end
 
-            local function Gate(where, expected_destination)
+            local function Gate(where, expected_destination, retry_number)
                 if not trinket_bot.path_running then
                     return false
                 end
@@ -12937,6 +12937,36 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     end
                 end
 
+                -- If several Gate attempts have already failed, the character may be standing
+                -- directly on a cliff/edge where the spell refuses to cast. On attempts 4, 7 and
+                -- 10, make a small LOCAL-right reposition before trying again. Ground is checked
+                -- first so the recovery itself does not walk the bot off an edge.
+                if retry_number and retry_number >= 4 and retry_number <= 10 and ((retry_number - 4) % 3 == 0)
+                    and character and not cs:HasTag(character, "Danger") then
+                    local hrp = FindFirstChild(character, "HumanoidRootPart")
+                    if hrp then
+                        local nudge_distance = 5
+                        local target_position = hrp.Position + (hrp.CFrame.RightVector * nudge_distance)
+                        local ray_params = RaycastParams.new()
+                        ray_params.FilterType = Enum.RaycastFilterType.Exclude
+                        ray_params.FilterDescendantsInstances = {character}
+
+                        local ground_hit = ws:Raycast(
+                            target_position + Vector3.new(0, 4, 0),
+                            Vector3.new(0, -12, 0),
+                            ray_params
+                        )
+
+                        if ground_hit then
+                            library:Notify(string.format("Gate retry %d: shifting %.0f studs right away from edge", retry_number, nudge_distance))
+                            SmoothTeleport(target_position)
+                            task.wait(0.4)
+                        else
+                            library:Notify(string.format("Gate retry %d: right-side ground not found; skipping reposition", retry_number))
+                        end
+                    end
+                end
+
                 if not mana_initialized and vim then
                     task.wait(0.3)
                     local charge_key = Enum.KeyCode.G
@@ -12948,55 +12978,18 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 end
 
                 blockInputs()
-                task.delay(5, function()
+                task.delay(12, function()
                     if INPUT_BLOCKED then
                         unblockInputs()
                     end
                 end)
 
-                local is_azael = Get and Get("Race") == "Azael"
-                local has_philosophers_stone = false
-                if FindFirstChild(plr.Character, "Artifacts") then
-                    local artifacts = plr.Character.Artifacts
-                    if FindFirstChild(artifacts, "PhilosophersStone") then
-                        has_philosophers_stone = true
-                    end
-                end
-
-                local in_danger = character and cs:HasTag(character, "Danger")
-                if is_azael and not in_danger then
-                    if mana.Value <= 15 then
-                        utility:charge_mana_until(15)
-                    end
-                elseif has_philosophers_stone then
-                    if mana.Value < 60 then
-                        utility:charge_mana_until(60)
-                    end
-                else
-                    local ping = getPing()
-                    local ping_adjustment = ping / 900
-
-                    local base_target = 79
-                    local adjusted_target = base_target - (ping_adjustment * 50)
-                    adjusted_target = math.clamp(adjusted_target, 75, 83)
-
-                    if mana.Value > 83 then
-                        utility:decharge_mana()
-                        while mana.Value > 83 and trinket_bot.path_running and not emergency_gate_requested and not trinket_bot.moderator_detected do
-                            task.wait(0.05)
-                        end
-                    end
-
-                    if mana.Value < adjusted_target then
-                        utility:charge_mana_until(adjusted_target)
-                    end
-                end
-
-                -- Gate lock is already active from the start of Gate(). Mana is ready now,
-                -- so equip Gate and perform the actual cast.
+                -- IMPORTANT: Equip Gate FIRST, then charge/verify mana while Gate is actually held.
+                -- Never execute RightClick/PsuedoChatted from a partial-mana state.
                 local gate_humanoid = FindFirstChildOfClass(plr.Character, "Humanoid")
                 if not gate_humanoid then
                     warn("Humanoid not found before gate cast - keeping Hold Weapon locked for retry")
+                    if INPUT_BLOCKED then unblockInputs() end
                     return false
                 end
 
@@ -13009,11 +13002,121 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 task.wait(0.3)
 
                 if gateTool.Parent ~= plr.Character then
-                    warn("Failed to equip Gate before cast - keeping Hold Weapon locked for retry")
+                    warn("Failed to equip Gate before mana prep - keeping Hold Weapon locked for retry")
+                    if INPUT_BLOCKED then unblockInputs() end
                     return false
                 end
 
-                task.wait(0.05)
+                local is_azael = Get and Get("Race") == "Azael"
+                local has_philosophers_stone = false
+                if FindFirstChild(plr.Character, "Artifacts") then
+                    local artifacts = plr.Character.Artifacts
+                    if FindFirstChild(artifacts, "PhilosophersStone") then
+                        has_philosophers_stone = true
+                    end
+                end
+
+                local in_danger = character and cs:HasTag(character, "Danger")
+                local gate_target_mana
+                local gate_max_mana = nil
+
+                if is_azael and not in_danger then
+                    gate_target_mana = 15
+                elseif has_philosophers_stone then
+                    gate_target_mana = 60
+                else
+                    local ping = getPing()
+                    local ping_adjustment = ping / 900
+                    local base_target = 79
+                    gate_target_mana = math.clamp(base_target - (ping_adjustment * 50), 75, 83)
+                    gate_max_mana = 83
+                end
+
+                library:Notify(string.format(
+                    "Gate equipped - preparing mana: %.1f%% / target %.1f%%",
+                    mana.Value,
+                    gate_target_mana
+                ))
+
+                -- charge_mana_until() can return early when mana is temporarily unavailable.
+                -- Therefore keep re-checking the ACTUAL Mana.Value. A Gate cast is allowed only
+                -- after the target has genuinely been reached.
+                local mana_ready_deadline = tick() + 15
+                local mana_ready = false
+
+                while trinket_bot.path_running
+                    and not emergency_gate_requested
+                    and not trinket_bot.moderator_detected
+                    and tick() < mana_ready_deadline
+                do
+                    if gate_max_mana and mana.Value > gate_max_mana then
+                        utility:decharge_mana()
+
+                        local decharge_deadline = tick() + 4
+                        while mana.Value > gate_max_mana
+                            and trinket_bot.path_running
+                            and not emergency_gate_requested
+                            and not trinket_bot.moderator_detected
+                            and tick() < decharge_deadline
+                        do
+                            task.wait(0.05)
+                        end
+                    elseif mana.Value < gate_target_mana then
+                        utility:charge_mana_until(gate_target_mana)
+
+                        -- If charge_mana_until returned early, do not cast. Give the temporary
+                        -- ManaStop/Stun/etc. a moment to clear, then try charging again.
+                        if mana.Value < gate_target_mana then
+                            task.wait(0.15)
+                        end
+                    else
+                        mana_ready = (not gate_max_mana) or mana.Value <= gate_max_mana
+                        if mana_ready then
+                            break
+                        end
+                    end
+                end
+
+                if not mana_ready then
+                    mana_ready = mana.Value >= gate_target_mana
+                        and ((not gate_max_mana) or mana.Value <= gate_max_mana)
+                end
+
+                if not mana_ready then
+                    library:Notify(string.format(
+                        "Gate mana NOT ready (%.1f%% / %.1f%%) - refusing partial cast; retrying Gate",
+                        mana.Value,
+                        gate_target_mana
+                    ))
+                    if INPUT_BLOCKED then
+                        unblockInputs()
+                    end
+                    return false
+                end
+
+                -- Charging can occasionally disturb the held tool; verify Gate is still equipped
+                -- before the actual cast and re-equip it if needed.
+                if gateTool.Parent ~= plr.Character then
+                    gate_humanoid:UnequipTools()
+                    task.wait(0.05)
+                    if gateTool.Parent == plr.Backpack then
+                        gate_humanoid:EquipTool(gateTool)
+                    end
+                    task.wait(0.2)
+                end
+
+                if gateTool.Parent ~= plr.Character then
+                    warn("Gate was lost after mana prep - refusing cast and retrying")
+                    if INPUT_BLOCKED then unblockInputs() end
+                    return false
+                end
+
+                library:Notify(string.format(
+                    "Gate mana confirmed at %.1f%% - executing Gate",
+                    mana.Value
+                ))
+
+                task.wait(0.08)
                 utility:RightClick()
                 task.wait(0.8)
 
@@ -16020,7 +16123,7 @@ end
                                         end
 
                                         local expected_dest = trinket_bot.path_points[gate_index + 1] and trinket_bot.path_points[gate_index + 1].position or nil
-                                        gate_success = Gate(gate_point.gate_location, expected_dest)
+                                        gate_success = Gate(gate_point.gate_location, expected_dest, retry_count)
                                     end
 
                                     if retry_platform then
@@ -16137,7 +16240,7 @@ end
                                 end
 
                                 local expected_dest = trinket_bot.path_points[i + 1] and trinket_bot.path_points[i + 1].position or nil
-                                gate_success = Gate(point.gate_location, expected_dest)
+                                gate_success = Gate(point.gate_location, expected_dest, retry_count)
                             end
 
                             if not gate_success then
