@@ -12937,32 +12937,154 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     end
                 end
 
-                -- If several Gate attempts have already failed, the character may be standing
-                -- directly on a cliff/edge where the spell refuses to cast. On attempts 4, 7 and
-                -- 10, make a small LOCAL-right reposition before trying again. Ground is checked
-                -- first so the recovery itself does not walk the bot off an edge.
-                if retry_number and retry_number >= 4 and retry_number <= 10 and ((retry_number - 4) % 3 == 0)
-                    and character and not cs:HasTag(character, "Danger") then
+                -- GATE PLATFORM / ANTI-CLIFF CHECK:
+                -- Gate can fail when the character is technically standing on ground but too close
+                -- to an edge. Do not assume the safe direction is always "right". Verify a real
+                -- footprint around the character (center + 4 sides + 4 corners). If the current
+                -- footprint is too narrow, search nearby positions in 8 directions and move only
+                -- to a position that has enough flat ground around it.
+                if character and not cs:HasTag(character, "Danger") then
                     local hrp = FindFirstChild(character, "HumanoidRootPart")
                     if hrp then
-                        local nudge_distance = 5
-                        local target_position = hrp.Position + (hrp.CFrame.RightVector * nudge_distance)
                         local ray_params = RaycastParams.new()
                         ray_params.FilterType = Enum.RaycastFilterType.Exclude
                         ray_params.FilterDescendantsInstances = {character}
 
-                        local ground_hit = ws:Raycast(
-                            target_position + Vector3.new(0, 4, 0),
-                            Vector3.new(0, -12, 0),
-                            ray_params
-                        )
+                        local right = Vector3.new(hrp.CFrame.RightVector.X, 0, hrp.CFrame.RightVector.Z)
+                        local forward = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
 
-                        if ground_hit then
-                            library:Notify(string.format("Gate retry %d: shifting %.0f studs right away from edge", retry_number, nudge_distance))
-                            SmoothTeleport(target_position)
-                            task.wait(0.4)
+                        if right.Magnitude < 0.01 then
+                            right = Vector3.new(1, 0, 0)
                         else
-                            library:Notify(string.format("Gate retry %d: right-side ground not found; skipping reposition", retry_number))
+                            right = right.Unit
+                        end
+
+                        if forward.Magnitude < 0.01 then
+                            forward = Vector3.new(0, 0, -1)
+                        else
+                            forward = forward.Unit
+                        end
+
+                        local FOOTPRINT_HALF = 4.5       -- roughly a 9x9-stud safe platform
+                        local MAX_HEIGHT_DELTA = 2.5    -- reject steep/uneven edge geometry
+                        local MAX_NEARBY_Y_DELTA = 6    -- do not relocate to a lower cliff level
+
+                        local function ray_ground(xz_position)
+                            return ws:Raycast(
+                                Vector3.new(xz_position.X, hrp.Position.Y + 8, xz_position.Z),
+                                Vector3.new(0, -30, 0),
+                                ray_params
+                            )
+                        end
+
+                        local current_center_hit = ray_ground(hrp.Position)
+                        local current_ground_y = current_center_hit and current_center_hit.Position.Y or nil
+                        local root_height = 3
+
+                        if current_center_hit then
+                            root_height = math.clamp(hrp.Position.Y - current_center_hit.Position.Y, 2.5, 5)
+                        end
+
+                        local footprint_offsets = {
+                            Vector3.new(0, 0, 0),
+                            right * FOOTPRINT_HALF,
+                            -right * FOOTPRINT_HALF,
+                            forward * FOOTPRINT_HALF,
+                            -forward * FOOTPRINT_HALF,
+                            (right + forward).Unit * (FOOTPRINT_HALF * 1.15),
+                            (right - forward).Unit * (FOOTPRINT_HALF * 1.15),
+                            (-right + forward).Unit * (FOOTPRINT_HALF * 1.15),
+                            (-right - forward).Unit * (FOOTPRINT_HALF * 1.15),
+                        }
+
+                        local function has_gate_footprint(candidate_position)
+                            local center_hit = ray_ground(candidate_position)
+                            if not center_hit or center_hit.Normal.Y < 0.55 then
+                                return false, nil
+                            end
+
+                            if current_ground_y and math.abs(center_hit.Position.Y - current_ground_y) > MAX_NEARBY_Y_DELTA then
+                                return false, nil
+                            end
+
+                            local center_y = center_hit.Position.Y
+
+                            for _, offset in ipairs(footprint_offsets) do
+                                local sample_position = candidate_position + offset
+                                local hit = ray_ground(sample_position)
+
+                                if not hit
+                                    or hit.Normal.Y < 0.55
+                                    or math.abs(hit.Position.Y - center_y) > MAX_HEIGHT_DELTA
+                                then
+                                    return false, nil
+                                end
+                            end
+
+                            return true, Vector3.new(
+                                candidate_position.X,
+                                center_y + root_height,
+                                candidate_position.Z
+                            )
+                        end
+
+                        local current_safe = has_gate_footprint(hrp.Position)
+
+                        if not current_safe then
+                            local directions = {
+                                right,
+                                -right,
+                                forward,
+                                -forward,
+                                (right + forward).Unit,
+                                (right - forward).Unit,
+                                (-right + forward).Unit,
+                                (-right - forward).Unit,
+                            }
+
+                            -- Search farther only after repeated failures. The first attempts remain
+                            -- close to the recorded Gate point; later retries are allowed to look
+                            -- farther for a genuinely wide platform.
+                            local search_radii = {4, 7, 10, 14}
+                            if retry_number and retry_number >= 3 then
+                                table.insert(search_radii, 18)
+                                table.insert(search_radii, 22)
+                            end
+
+                            local safe_target = nil
+                            local safe_distance = nil
+
+                            for _, radius in ipairs(search_radii) do
+                                for _, direction in ipairs(directions) do
+                                    local candidate = hrp.Position + (direction * radius)
+                                    local footprint_ok, resolved_target = has_gate_footprint(candidate)
+
+                                    if footprint_ok then
+                                        safe_target = resolved_target
+                                        safe_distance = radius
+                                        break
+                                    end
+                                end
+
+                                if safe_target then
+                                    break
+                                end
+                            end
+
+                            if safe_target then
+                                library:Notify(string.format(
+                                    "Gate%s: cliff/narrow platform detected - moving %.0f studs to a verified 9x9 safe footprint",
+                                    retry_number and (" retry " .. tostring(retry_number)) or "",
+                                    safe_distance or 0
+                                ))
+                                SmoothTeleport(safe_target)
+                                task.wait(0.55)
+                            else
+                                library:Notify(string.format(
+                                    "Gate%s: no verified wide platform found nearby - attempting cast here and rescanning on retry",
+                                    retry_number and (" retry " .. tostring(retry_number)) or ""
+                                ))
+                            end
                         end
                     end
                 end
@@ -14159,14 +14281,50 @@ end
                 elseif not stay_in_server then
                     local distance_to_first = (root.Position - first_point).Magnitude
                     if distance_to_first > 400 then
-                        trinket_bot.path_running = false
-                        library:Notify(string.format("Too far from first point! Distance: %.1f studs (max: 400)", distance_to_first))
-                        if not test_mode and mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true" then
-                            utility:plain_webhook(string.format("**BOT KICKED**: Too far from first point (%.1f studs, max: 400) @here", distance_to_first))
-                            task.wait(1)
-                            plr:Kick(string.format("Too far from first point: %.1f studs (max: 400)", distance_to_first))
+                        -- Do NOT kick just because the bot spawned far from point 1. Find the path
+                        -- point nearest to the CURRENT character position and resume forward from
+                        -- there. This preserves the original point order from the nearest point to
+                        -- the end instead of forcing a return to point 1.
+                        local closest_point_index = 1
+                        local closest_distance = distance_to_first
+
+                        for idx, path_point in ipairs(trinket_bot.path_points) do
+                            if path_point and path_point.position then
+                                local dist = (root.Position - path_point.position).Magnitude
+                                if dist < closest_distance then
+                                    closest_distance = dist
+                                    closest_point_index = idx
+                                end
+                            end
                         end
-                        return
+
+                        if closest_point_index > 1 then
+                            local original_path = trinket_bot.path_points
+                            local resumed_path = {}
+
+                            for idx = closest_point_index, #original_path do
+                                table.insert(resumed_path, original_path[idx])
+                            end
+
+                            trinket_bot.path_points = resumed_path
+                            first_point = resumed_path[1] and resumed_path[1].position or first_point
+                        end
+
+                        library:Notify(string.format(
+                            "Too far from first point (%.1f studs) - starting from nearest path point %d (%.1f studs away)",
+                            distance_to_first,
+                            closest_point_index,
+                            closest_distance
+                        ))
+
+                        if utility and mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true" then
+                            utility:plain_webhook(string.format(
+                                "Bot was %.1f studs from point 1; resuming from nearest path point %d (%.1f studs away) instead of kicking",
+                                distance_to_first,
+                                closest_point_index,
+                                closest_distance
+                            ))
+                        end
                     end
                 end
 
