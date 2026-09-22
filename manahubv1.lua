@@ -2478,11 +2478,11 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             function utility:charge_mana_until(amount)
                 local character = plr.Character
                 if not character or FindFirstChildWhichIsA(character, 'ForceField') or not can_use_mana() then
-                    return warn('mana unavailable', can_use_mana())
+                    return false
                 end
 
                 local mana = FindFirstChild(character, 'Mana')
-                if not mana then return end
+                if not mana then return false end
 
                 if FindFirstChild(character, 'Charge') then
                     utility:decharge_mana()
@@ -2506,6 +2506,8 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         adjusted_wait(0.3, 1.0)
                     end
                 end
+
+                return true
             end
         end
 
@@ -2813,6 +2815,12 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             local function attemptTeleport(jobId, maxRetries)
                 maxRetries = maxRetries or 3
                 local retries = 0
+
+                -- Record the destination before firing the teleport. On a successful teleport
+                -- this script may be destroyed before it gets a chance to update history.
+                if utility and utility.add_server_to_history then
+                    utility:add_server_to_history(jobId)
+                end
 
                 while retries < maxRetries do
                     teleport_failed = false
@@ -13239,6 +13247,15 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 ))
 
                 task.wait(0.08)
+
+                local pre_gate_root = character and FindFirstChild(character, "HumanoidRootPart")
+                if not pre_gate_root then
+                    warn("HumanoidRootPart missing before gate cast - keeping Hold Weapon locked for retry")
+                    if INPUT_BLOCKED then unblockInputs() end
+                    return false
+                end
+                local pre_gate_position = pre_gate_root.Position
+
                 utility:RightClick()
                 task.wait(0.8)
 
@@ -13252,13 +13269,35 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     unblockInputs()
                 end
 
-                local post_gate_wait_start = tick()
-                while tick() - post_gate_wait_start < 2.5 and trinket_bot.path_running and not emergency_gate_requested and not trinket_bot.moderator_detected do
-                    if FindFirstChild(character, "NoFall") then
-                        task.wait(1.5)
+                -- NoFall is useful, but it can arrive late or be absent. Verify the Gate by
+                -- either NoFall OR a real position jump, then validate the expected destination.
+                local verify_deadline = tick() + 6
+                while tick() < verify_deadline
+                    and trinket_bot.path_running
+                    and not emergency_gate_requested
+                    and not trinket_bot.moderator_detected
+                do
+                    local current_character = plr.Character
+                    local current_root = current_character and FindFirstChild(current_character, "HumanoidRootPart")
 
-                        if character and FindFirstChild(character, "HumanoidRootPart") then
-                            local post_gate_position = character.HumanoidRootPart.Position
+                    if current_root then
+                        local post_gate_position = current_root.Position
+                        local moved_distance = (post_gate_position - pre_gate_position).Magnitude
+                        local has_nofall = FindFirstChild(current_character, "NoFall") ~= nil
+
+                        if has_nofall or moved_distance >= 150 then
+                            -- Give the character a brief moment to settle after the teleport marker
+                            -- appears, then refresh the root position before destination validation.
+                            if has_nofall then
+                                task.wait(0.5)
+                                current_character = plr.Character
+                                current_root = current_character and FindFirstChild(current_character, "HumanoidRootPart")
+                                if not current_root then
+                                    warn("Character lost during gate verification - keeping Hold Weapon locked for retry")
+                                    return false
+                                end
+                                post_gate_position = current_root.Position
+                            end
 
                             if expected_destination then
                                 local distance_to_destination = (post_gate_position - expected_destination).Magnitude
@@ -13269,24 +13308,19 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                                 end
 
                                 library:Notify(string.format("Successfully gated to %s (%.0f studs from destination) - Hold Weapon unlocked", where, distance_to_destination))
-
-                                unlockHeldWeaponAfterGateSuccess()
-                                return true
+                            else
+                                library:Notify(string.format("Successfully gated to %s - Hold Weapon unlocked", where))
                             end
-
-                            library:Notify(string.format("Successfully gated to %s - Hold Weapon unlocked", where))
 
                             unlockHeldWeaponAfterGateSuccess()
                             return true
-                        else
-                            warn("Character lost during gate verification - keeping Hold Weapon locked for retry")
-                            return false
                         end
                     end
+
                     task.wait(0.1)
                 end
 
-                warn("Gate teleportation failed: NoFall not found after 2.5s - keeping Hold Weapon locked for retry")
+                warn("Gate teleportation could not be verified after 6s (no NoFall/position jump) - keeping Hold Weapon locked for retry")
                 return false
             end
 
@@ -22107,8 +22141,8 @@ end
         end
 
         if isfile(model_path) then
-            local asset = getcustomasset(model_path)
             local success, model = pcall(function()
+                local asset = getcustomasset(model_path)
                 return game:GetObjects(asset)[1]
             end)
 
@@ -22116,6 +22150,14 @@ end
                 legit_intent_gui = model
             else
                 warn("failed to load intent model:", model)
+
+                -- A corrupt/stale cached RBXM otherwise fails again after every serverhop.
+                -- Remove it so the next execution downloads a fresh copy.
+                pcall(function()
+                    if delfile and isfile(model_path) then
+                        delfile(model_path)
+                    end
+                end)
             end
         end
 
