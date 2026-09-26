@@ -12176,7 +12176,15 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 expected_teleport_until = 0,
                 hop_in_progress = false,
                 stuck_since = 0,
-                gate_in_progress = false
+                gate_in_progress = false,
+
+                -- Path/Gate reliability state
+                last_successful_gate = nil,
+                current_point_index = 0,
+                current_point_started_at = 0,
+                last_path_progress_at = 0,
+                last_path_position = nil,
+                path_watchdog_busy = false
             }
 
             cheat_client.trinket_bot = trinket_bot
@@ -12745,6 +12753,31 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     return false
                 end
 
+                -- DUPLICATE-GATE GUARD:
+                -- A verified Gate can be requested again by recovery/path logic before the next
+                -- path point has had time to advance. If we are still at the landing position,
+                -- treat the repeated request as already completed instead of casting Gate twice.
+                do
+                    local recent_gate = trinket_bot.last_successful_gate
+                    local current_character = plr.Character
+                    local current_root = current_character and FindFirstChild(current_character, "HumanoidRootPart")
+
+                    if recent_gate
+                        and current_root
+                        and tostring(recent_gate.where) == tostring(where)
+                        and (tick() - (recent_gate.time or 0)) <= 12
+                        and recent_gate.position
+                        and (current_root.Position - recent_gate.position).Magnitude <= 180
+                    then
+                        warn(string.format("[GATE] Duplicate %s request suppressed (already gated %.1fs ago)", tostring(where), tick() - (recent_gate.time or tick())))
+                        pcall(function()
+                            library:Notify(string.format("Already gated to %s - skipping duplicate Gate cast", tostring(where)))
+                        end)
+                        trinket_bot.gate_in_progress = false
+                        return true
+                    end
+                end
+
                 -- HARD GATE LOCK:
                 -- Once the bot starts processing a Gate point, HoldWeaponWhileBotting must
                 -- stay disabled across every failed attempt/retry. It is unlocked ONLY after
@@ -13286,23 +13319,59 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         local has_nofall = FindFirstChild(current_character, "NoFall") ~= nil
 
                         if has_nofall or moved_distance >= 150 then
-                            -- Give the character a brief moment to settle after the teleport marker
-                            -- appears, then refresh the root position before destination validation.
-                            if has_nofall then
-                                task.wait(0.5)
+                            -- Gate replication can report NoFall / the first large position jump before
+                            -- the final landing position has settled. Sample for a short window and keep
+                            -- the position closest to the recorded next path point. This prevents a real
+                            -- successful Gate from being misread as a failure and immediately cast again.
+                            local settled_position = post_gate_position
+                            local best_destination_distance = expected_destination
+                                and (settled_position - expected_destination).Magnitude
+                                or nil
+                            local settle_deadline = tick() + 1.5
+
+                            while tick() < settle_deadline
+                                and trinket_bot.path_running
+                                and not emergency_gate_requested
+                                and not trinket_bot.moderator_detected
+                            do
+                                task.wait(0.1)
+
                                 current_character = plr.Character
                                 current_root = current_character and FindFirstChild(current_character, "HumanoidRootPart")
                                 if not current_root then
                                     warn("Character lost during gate verification - keeping Hold Weapon locked for retry")
                                     return false
                                 end
-                                post_gate_position = current_root.Position
+
+                                local candidate_position = current_root.Position
+                                if expected_destination then
+                                    local candidate_distance = (candidate_position - expected_destination).Magnitude
+                                    if not best_destination_distance or candidate_distance < best_destination_distance then
+                                        best_destination_distance = candidate_distance
+                                        settled_position = candidate_position
+                                    end
+
+                                    -- Once we are comfortably inside the destination area there is no
+                                    -- reason to keep waiting for more replication samples.
+                                    if candidate_distance <= 350 then
+                                        break
+                                    end
+                                else
+                                    settled_position = candidate_position
+                                end
                             end
 
-                            if expected_destination then
-                                local distance_to_destination = (post_gate_position - expected_destination).Magnitude
+                            post_gate_position = settled_position
 
-                                if distance_to_destination > 700 then
+                            if expected_destination then
+                                local distance_to_destination = best_destination_distance
+                                    or (post_gate_position - expected_destination).Magnitude
+
+                                -- SmoothTeleport itself refuses path jumps above 1500 studs. Therefore a
+                                -- Gate landing within 1500 studs of the next recorded path point is a
+                                -- usable/valid landing and must not be retried just because it is >700.
+                                local GATE_DESTINATION_TOLERANCE = 1500
+                                if distance_to_destination > GATE_DESTINATION_TOLERANCE then
                                     library:Notify(string.format("BACKFIRE detected (%.0f studs from expected destination) - Hold Weapon remains locked; retrying Gate", distance_to_destination))
                                     return false
                                 end
@@ -13311,6 +13380,12 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             else
                                 library:Notify(string.format("Successfully gated to %s - Hold Weapon unlocked", where))
                             end
+
+                            trinket_bot.last_successful_gate = {
+                                where = tostring(where),
+                                time = tick(),
+                                position = post_gate_position
+                            }
 
                             unlockHeldWeaponAfterGateSuccess()
                             return true
@@ -14291,6 +14366,13 @@ end
                 -- Fresh path run: Hold Weapon is allowed until we actually enter a Gate point.
                 trinket_bot.gate_in_progress = false
 
+                -- Reset path-progress watchdog state for this run.
+                trinket_bot.current_point_index = 0
+                trinket_bot.current_point_started_at = tick()
+                trinket_bot.last_path_progress_at = tick()
+                trinket_bot.last_path_position = nil
+                trinket_bot.path_watchdog_busy = false
+
                 if not plr.Character or not FindFirstChild(plr.Character, "HumanoidRootPart") then
                     trinket_bot.path_running = false
                     library:Notify("Character not found!")
@@ -14298,6 +14380,7 @@ end
                 end
 
                 local root = plr.Character.HumanoidRootPart
+                trinket_bot.last_path_position = root.Position
                 local first_point = trinket_bot.path_points[1] and trinket_bot.path_points[1].position
 
                 if not first_point or typeof(first_point) ~= "Vector3" then
@@ -14850,6 +14933,160 @@ end
                                 utility:plain_webhook("@here WATCHDOG: Bot still stuck after 2 forced hops - kicking")
                             end)
                             plr:Kick("Watchdog: stuck at menu after repeated forced serverhop attempts")
+                        end
+                    end)))
+                end
+
+                -- Path-progress watchdog:
+                -- The existing watchdog only protects the menu state. This one protects the live
+                -- path itself (especially the recurring "back at point 1 and frozen" case).
+                -- If the current point makes no meaningful progress for too long, cancel the active
+                -- tween and force the normal TrinketBot serverhop flow so botting can continue.
+                do
+                    local watched_point_index = -1
+                    local no_progress_since = tick()
+                    local last_sample_position = nil
+                    local missing_root_since = nil
+                    local gate_wait_since = nil
+
+                    local function force_path_watchdog_hop(reason)
+                        if trinket_bot.path_watchdog_busy or trinket_bot.hop_in_progress then
+                            return
+                        end
+
+                        trinket_bot.path_watchdog_busy = true
+                        trinket_bot.path_running = false
+
+                        if active_tween_data.tween then
+                            pcall(function() active_tween_data.tween:Cancel() end)
+                            active_tween_data.tween = nil
+                        end
+                        if active_tween_data.connection then
+                            pcall(function() active_tween_data.connection:Disconnect() end)
+                            active_tween_data.connection = nil
+                        end
+                        active_tween_data.target_position = nil
+
+                        pcall(function()
+                            library:Notify("WATCHDOG: " .. reason .. " - serverhopping")
+                        end)
+                        pcall(function()
+                            utility:plain_webhook("@here WATCHDOG: " .. reason .. " - forcing serverhop")
+                        end)
+
+                        task.spawn(function()
+                            TrinketBotServerhop("Path watchdog: " .. reason, true, true)
+                            trinket_bot.path_watchdog_busy = false
+                        end)
+                    end
+
+                    track_connection("path_progress_watchdog", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
+                        if test_mode or shared.is_unloading then
+                            return
+                        end
+
+                        if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then
+                            watched_point_index = -1
+                            no_progress_since = tick()
+                            last_sample_position = nil
+                            missing_root_since = nil
+                            return
+                        end
+
+                        if not trinket_bot.path_running or trinket_bot.hop_in_progress or trinket_bot.path_watchdog_busy then
+                            watched_point_index = -1
+                            no_progress_since = tick()
+                            last_sample_position = nil
+                            missing_root_since = nil
+                            return
+                        end
+
+                        -- Gate has its own SnapCool/Danger/mana waits. Give it a generous window,
+                        -- but do not allow a stale Gate lock to suppress recovery forever.
+                        if trinket_bot.gate_in_progress then
+                            gate_wait_since = gate_wait_since or tick()
+                            no_progress_since = tick()
+                            last_sample_position = nil
+                            if tick() - gate_wait_since >= 60 then
+                                force_path_watchdog_hop("Gate state stuck for 60s")
+                            end
+                            return
+                        end
+                        gate_wait_since = nil
+
+                        local character = plr.Character
+                        local root_part = character and FindFirstChild(character, "HumanoidRootPart")
+                        local now = tick()
+
+                        if not root_part then
+                            missing_root_since = missing_root_since or now
+                            if now - missing_root_since >= 10 then
+                                force_path_watchdog_hop("HumanoidRootPart missing for 10s during path")
+                            end
+                            return
+                        end
+                        missing_root_since = nil
+
+                        local point_index = tonumber(trinket_bot.current_point_index) or 0
+                        if point_index ~= watched_point_index then
+                            watched_point_index = point_index
+                            no_progress_since = now
+                            last_sample_position = root_part.Position
+                            trinket_bot.last_path_progress_at = now
+                            trinket_bot.last_path_position = root_part.Position
+                            return
+                        end
+
+                        if not last_sample_position then
+                            last_sample_position = root_part.Position
+                            no_progress_since = now
+                            return
+                        end
+
+                        local moved = (root_part.Position - last_sample_position).Magnitude
+                        if moved >= 5 then
+                            last_sample_position = root_part.Position
+                            no_progress_since = now
+                            trinket_bot.last_path_progress_at = now
+                            trinket_bot.last_path_position = root_part.Position
+                            return
+                        end
+
+                        -- Do not fire while a normal SmoothTeleport is still inside its expected
+                        -- travel window. Give it a small grace period for low FPS / replication.
+                        if now <= (trinket_bot.expected_teleport_until or 0) + 4 then
+                            return
+                        end
+
+                        local point = point_index > 0 and trinket_bot.path_points[point_index] or nil
+                        local point_elapsed = now - (trinket_bot.current_point_started_at or now)
+                        local stalled_for = now - no_progress_since
+                        local max_point_time = (point_index == 1) and 20 or 35
+
+                        if point and point.wait_time and point.wait_time > 0 then
+                            max_point_time = math.max(max_point_time, point.wait_time + 15)
+                        end
+                        if point and point.wait_for_trinket then
+                            max_point_time = math.max(max_point_time, 30)
+                        end
+
+                        local far_from_target = false
+                        local target_distance = 0
+                        if point and point.position then
+                            target_distance = (root_part.Position - point.position).Magnitude
+                            far_from_target = target_distance > 250
+                        end
+
+                        -- Point 1 gets a tighter timeout because this is the known recurring freeze.
+                        -- Other points get more room, but a clearly off-path stationary state also hops.
+                        if point_index == 1 and point_elapsed >= max_point_time and stalled_for >= 12 then
+                            force_path_watchdog_hop(string.format("stuck at point 1 for %.0fs", point_elapsed))
+                        elseif point_index > 0 and point_elapsed >= max_point_time and stalled_for >= 18 then
+                            force_path_watchdog_hop(string.format("stuck at point %d for %.0fs", point_index, point_elapsed))
+                        elseif point_index > 0 and far_from_target and point_elapsed >= 18 and stalled_for >= 12 then
+                            force_path_watchdog_hop(string.format("off-path at point %d (%.0f studs away, no movement %.0fs)", point_index, target_distance, stalled_for))
+                        elseif point_index == 0 and stalled_for >= 35 then
+                            force_path_watchdog_hop("path started but never reached point 1")
                         end
                     end)))
                 end
@@ -15433,6 +15670,13 @@ end
 
                 local i = 1
                 while i <= #trinket_bot.path_points do
+                    trinket_bot.current_point_index = i
+                    trinket_bot.current_point_started_at = tick()
+                    trinket_bot.last_path_progress_at = tick()
+                    if plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") then
+                        trinket_bot.last_path_position = plr.Character.HumanoidRootPart.Position
+                    end
+
                     if trinket_bot.moderator_detected then
                         library:Notify("Moderator detected - exiting main loop")
                         break
@@ -16713,6 +16957,7 @@ end
                         if trinket_bot.original_point_1_position then
                             local dist_to_original_p1 = (point.position - trinket_bot.original_point_1_position).Magnitude
                             if dist_to_original_p1 < 5 and i > 1 then
+                                trinket_bot.path_running = false
                                 TrinketBotServerhop("back to point 1!!!", nil, true)
                                 return
                             end
@@ -16977,6 +17222,7 @@ end
                                     end
                                 end
 
+                                trinket_bot.path_running = false
                                 TrinketBotServerhop(string.format("Player %s blocking path so i traversed back to point 1!!", player_name), nil, true)
                                 return
                             end
@@ -16985,6 +17231,9 @@ end
 
                     i = i + 1
                 end
+
+                trinket_bot.current_point_index = 0
+                trinket_bot.current_point_started_at = 0
 
                 if kick_after_path then
                     library:Notify(string.format("Reached last point! Kicking for %s...", kick_trinket_name))
