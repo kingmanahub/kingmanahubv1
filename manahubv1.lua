@@ -13754,6 +13754,7 @@ end
                     disable_gpu_rendering = Toggles.DisableGPURendering and Toggles.DisableGPURendering.Value or false,
                     emergency_serverhop_conditions = Options.EmergencyServerhopConditions and Options.EmergencyServerhopConditions.Value or {},
                     dangerous_spells_in_range = Options.DangerousSpellsInRange and Options.DangerousSpellsInRange.Value or {},
+                    dangerous_equipped_spells_v1 = true,
                     join_oldest_server = Toggles.JoinOldestServer and Toggles.JoinOldestServer.Value or false,
                     auto_pop_pds = Toggles.AutoPopPDs and Toggles.AutoPopPDs.Value or false,
                     auto_drop_items = Options.AutoDropItems and Options.AutoDropItems.Value or {},
@@ -14785,6 +14786,11 @@ end
                 end
 
                 -- Dangerous Spells in Range (600 studs) - separate from emergency conditions
+                -- Spindulys / Justice Spears only trigger while actually equipped in the Character.
+                local equipped_only_dangerous_spells = {
+                    ["Spindulys"] = true,
+                    ["Justice Spears"] = true
+                }
                 local dangerous_spells = Options.DangerousSpellsInRange and Options.DangerousSpellsInRange.Value or {}
                 if next(dangerous_spells) ~= nil then
                     local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
@@ -14806,10 +14812,14 @@ end
                                         for _, container in ipairs(containers) do
                                             for _, tool in next, container:GetChildren() do
                                                 if tool:IsA("Tool") and dangerous_spells[tool.Name] then
-                                                    library:Notify(string.format("Player %s has %s within %.0f studs - serverhop!", other_player.Name, tool.Name, dist))
-                                                    trinket_bot.path_running = false
-                                                    TrinketBotServerhop(string.format("Player %s has dangerous spell %s within %.0f studs", other_player.Name, tool.Name, dist), nil, true)
-                                                    return
+                                                    local equipped_only = equipped_only_dangerous_spells[tool.Name] == true
+                                                    local is_equipped = other_player.Character and tool.Parent == other_player.Character
+                                                    if (not equipped_only) or is_equipped then
+                                                        library:Notify(string.format("Player %s has %s within %.0f studs%s - serverhop!", other_player.Name, tool.Name, dist, equipped_only and " (equipped)" or ""))
+                                                        trinket_bot.path_running = false
+                                                        TrinketBotServerhop(string.format("Player %s has dangerous spell %s within %.0f studs%s", other_player.Name, tool.Name, dist, equipped_only and " (equipped)" or ""), nil, true)
+                                                        return
+                                                    end
                                                 end
                                             end
                                         end
@@ -14840,11 +14850,15 @@ end
                                     for _, container in ipairs(containers) do
                                         for _, tool in next, container:GetChildren() do
                                             if tool:IsA("Tool") and dangerous_spells[tool.Name] then
-                                                local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
-                                                library:Notify(string.format("Player %s has %s within %.0f studs - serverhop!", other_player.Name, tool.Name, dist))
-                                                trinket_bot.path_running = false
-                                                TrinketBotServerhop(string.format("Player %s has dangerous spell %s within %.0f studs", other_player.Name, tool.Name, dist), nil, true)
-                                                return
+                                                local equipped_only = equipped_only_dangerous_spells[tool.Name] == true
+                                                local is_equipped = other_player.Character and tool.Parent == other_player.Character
+                                                if (not equipped_only) or is_equipped then
+                                                    local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
+                                                    library:Notify(string.format("Player %s has %s within %.0f studs%s - serverhop!", other_player.Name, tool.Name, dist, equipped_only and " (equipped)" or ""))
+                                                    trinket_bot.path_running = false
+                                                    TrinketBotServerhop(string.format("Player %s has dangerous spell %s within %.0f studs%s", other_player.Name, tool.Name, dist, equipped_only and " (equipped)" or ""), nil, true)
+                                                    return
+                                                end
                                             end
                                         end
                                     end
@@ -18020,10 +18034,10 @@ end
 
             group_trinket_bot:AddDropdown("DangerousSpellsInRange", {
                 Text = "Dangerous Spells (600 studs)",
-                Tooltip = "Serverhop if another player has these in backpack/character within 600 studs",
-                Values = {"Fimbulvetr", "Dagger Throw", "Armis", "Opal Shard"},
+                Tooltip = "Serverhop if another player has these within 600 studs. Spindulys and Justice Spears only trigger while equipped in Character (not Backpack).",
+                Values = {"Fimbulvetr", "Dagger Throw", "Armis", "Opal Shard", "Spindulys", "Justice Spears"},
                 Multi = true,
-                Default = {"Fimbulvetr", "Dagger Throw", "Armis", "Opal Shard"},
+                Default = {"Fimbulvetr", "Dagger Throw", "Armis", "Opal Shard", "Spindulys", "Justice Spears"},
                 Compact = true
             })
 
@@ -18220,7 +18234,20 @@ end
                 if Toggles.PickupTrinkets then Toggles.PickupTrinkets:SetValue(settings.pickup_trinkets or false) end
                 if Toggles.DisableGPURendering then Toggles.DisableGPURendering:SetValue(settings.disable_gpu_rendering or false) end
                 if Options.EmergencyServerhopConditions then Options.EmergencyServerhopConditions:SetValue(settings.emergency_serverhop_conditions or {}) end
-                if Options.DangerousSpellsInRange then Options.DangerousSpellsInRange:SetValue(settings.dangerous_spells_in_range or {}) end
+                if Options.DangerousSpellsInRange then
+                    local dangerous_spells_setting = settings.dangerous_spells_in_range
+                    if type(dangerous_spells_setting) ~= "table" then
+                        dangerous_spells_setting = {
+                            ["Fimbulvetr"] = true, ["Dagger Throw"] = true, ["Armis"] = true, ["Opal Shard"] = true,
+                            ["Spindulys"] = true, ["Justice Spears"] = true
+                        }
+                    elseif settings.dangerous_equipped_spells_v1 ~= true then
+                        -- One-time migration for old saved paths. After the path is saved again, user choices are preserved.
+                        dangerous_spells_setting["Spindulys"] = true
+                        dangerous_spells_setting["Justice Spears"] = true
+                    end
+                    Options.DangerousSpellsInRange:SetValue(dangerous_spells_setting)
+                end
                 if Toggles.JoinOldestServer then Toggles.JoinOldestServer:SetValue(settings.join_oldest_server or false) end
                 if Toggles.AutoPopPDs then Toggles.AutoPopPDs:SetValue(settings.auto_pop_pds or false) end
                 if Options.AutoDropItems then Options.AutoDropItems:SetValue(settings.auto_drop_items or {}) end
@@ -19212,6 +19239,7 @@ end
                             disable_gpu_rendering = Toggles.DisableGPURendering and Toggles.DisableGPURendering.Value or false,
                             emergency_serverhop_conditions = Options.EmergencyServerhopConditions and Options.EmergencyServerhopConditions.Value or {},
                     dangerous_spells_in_range = Options.DangerousSpellsInRange and Options.DangerousSpellsInRange.Value or {},
+                            dangerous_equipped_spells_v1 = true,
                             join_oldest_server = Toggles.JoinOldestServer and Toggles.JoinOldestServer.Value or false,
                             auto_pop_pds = Toggles.AutoPopPDs and Toggles.AutoPopPDs.Value or false,
                             auto_drop_items = Options.AutoDropItems and Options.AutoDropItems.Value or {},
