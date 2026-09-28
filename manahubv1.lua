@@ -3157,9 +3157,20 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             warn("[SERVERHOP FALLBACK] No non-full servers available at all")
                         end
 
-                        utility:plain_webhook("@here SERVERHOP FAILED: All servers full or unavailable after 24 attempts. Retrying...")
-                        warn("[SERVERHOP] All attempts failed - retrying immediately...")
+                        utility:plain_webhook("@here SERVERHOP FAILED: All servers full or unavailable after 24 attempts.")
+                        warn("[SERVERHOP] All attempts failed")
                         task.wait(1)
+
+                        -- IMPORTANT: while Trinket Bot is active, do NOT recurse forever here.
+                        -- Recursive Serverhop() calls keep trinket_bot.hop_in_progress=true forever,
+                        -- which used to disable the menu watchdog and leave the bot stuck in StartMenu.
+                        -- Return control to TrinketBotServerhop/the session watchdog so it can recover.
+                        if bot_started then
+                            warn("[SERVERHOP] Bot session active - returning control to session watchdog")
+                            return false
+                        end
+
+                        -- Preserve the old continuous retry behavior for non-bot/manual serverhops.
                         return utility:Serverhop(prefer_empty)
                     else
                         warn("[!] No servers found in ServerInfo, using fallback")
@@ -14012,10 +14023,177 @@ end
 
             local teleport_debounce = false
 
-            -- If Trinket Bot gets stuck in StartMenu for 30s after a hop, retry automatically.
-            local MENU_SERVERHOP_TIMEOUT = 30
+            -- BOT SESSION SERVERHOP RECOVERY
+            -- Never trust hop_in_progress by itself: if a Serverhop coroutine stalls, that flag can
+            -- stay true forever. During an active Trinket Bot session we instead watch the actual
+            -- StartMenu + JobId and force an independent join attempt when no transition happens.
+            local MENU_SERVERHOP_TIMEOUT = 12
+            local MENU_DIRECT_RETRY_INTERVAL = 7
+            local MENU_TELEPORT_FALLBACK_AFTER = 45
             local menu_serverhop_watchdog_token = 0
+            local menu_recovery_busy = false
+            local menu_recovery_last_attempt = 0
+            local menu_recovery_attempt_count = 0
+            local menu_recovery_attempted_servers = {}
+            local menu_recovery_job_id = game.JobId
 
+            local function ResetMenuServerhopRecovery()
+                menu_recovery_busy = false
+                menu_recovery_last_attempt = 0
+                menu_recovery_attempt_count = 0
+                menu_recovery_attempted_servers = {}
+                menu_recovery_job_id = game.JobId
+            end
+
+            local function IsTrinketBotSessionActive()
+                return mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true"
+            end
+
+            local function CanSessionWatchdogHop()
+                if not IsTrinketBotSessionActive() then return false end
+                if shared and shared.is_unloading then return false end
+                if trinket_bot.test_mode then return false end
+                if Toggles.StayInServer and Toggles.StayInServer.Value then return false end
+                return true
+            end
+
+            local function PickWatchdogServer(prefer_empty)
+                local server_info = FindFirstChild(rps, "ServerInfo")
+                if not server_info then return nil end
+
+                local http_service = Services.HttpService
+                local candidates = {}
+
+                local function collect(skip_attempted)
+                    candidates = {}
+                    for _, server in ipairs(server_info:GetChildren()) do
+                        local job_id = server.Name
+                        if job_id ~= game.JobId and (not skip_attempted or not menu_recovery_attempted_servers[job_id]) then
+                            local players_value = FindFirstChild(server, "Players")
+                            local player_count = 0
+                            local is_available = true
+
+                            if players_value and players_value:IsA("StringValue") then
+                                local ok, decoded = pcall(function()
+                                    return http_service:JSONDecode(players_value.Value)
+                                end)
+                                if ok and type(decoded) == "table" then
+                                    player_count = #decoded
+                                    is_available = player_count < 23
+                                end
+                            end
+
+                            if is_available then
+                                table.insert(candidates, {job_id = job_id, players = player_count})
+                            end
+                        end
+                    end
+                end
+
+                collect(true)
+                if #candidates == 0 then
+                    -- We exhausted the local list. Clear only the watchdog-local attempts and try again.
+                    menu_recovery_attempted_servers = {}
+                    collect(false)
+                end
+
+                if #candidates == 0 then return nil end
+
+                if prefer_empty then
+                    table.sort(candidates, function(a, b)
+                        return a.players < b.players
+                    end)
+                    return candidates[1].job_id
+                end
+
+                return candidates[math.random(1, #candidates)].job_id
+            end
+
+            local function ForceSessionMenuServerhop(prefer_empty, source, menu_age)
+                if not CanSessionWatchdogHop() then return false end
+                if menu_recovery_busy then return false end
+
+                local now = tick()
+                if now - menu_recovery_last_attempt < MENU_DIRECT_RETRY_INTERVAL then
+                    return false
+                end
+
+                if menu_recovery_job_id ~= game.JobId then
+                    ResetMenuServerhopRecovery()
+                end
+
+                menu_recovery_busy = true
+                menu_recovery_last_attempt = now
+                menu_recovery_attempt_count = menu_recovery_attempt_count + 1
+
+                local starting_job_id = game.JobId
+                local attempt_number = menu_recovery_attempt_count
+                local age = tonumber(menu_age) or 0
+
+                -- A stale hop flag is diagnostic state, not proof a teleport is still progressing.
+                -- Clear it once the menu has demonstrably been stuck long enough so other recovery
+                -- paths cannot remain blocked forever.
+                if trinket_bot.hop_in_progress and age >= MENU_SERVERHOP_TIMEOUT then
+                    warn(string.format("[SESSION WATCHDOG] Clearing stale hop_in_progress after %.1fs in StartMenu", age))
+                    trinket_bot.hop_in_progress = false
+                end
+                trinket_bot.path_running = false
+
+                pcall(function()
+                    library:Notify(string.format("SESSION WATCHDOG: menu stuck %.0fs - recovery #%d", age, attempt_number))
+                end)
+                pcall(function()
+                    utility:plain_webhook(string.format("@here SESSION WATCHDOG: %s; StartMenu stuck %.0fs; recovery #%d", tostring(source or "unknown"), age, attempt_number))
+                end)
+
+                task.spawn(function()
+                    -- We are already in/near StartMenu, but re-request it in case the client is in a
+                    -- half-transition state. InvokeServer is wrapped so a broken remote cannot kill the watchdog.
+                    pcall(function()
+                        local requests = FindFirstChild(rps, "Requests")
+                        local return_menu = requests and FindFirstChild(requests, "ReturnToMenu")
+                        if return_menu then return_menu:InvokeServer() end
+                    end)
+                    task.wait(0.15)
+
+                    local force_teleport_service = age >= MENU_TELEPORT_FALLBACK_AFTER or attempt_number >= 5
+                    local requests = FindFirstChild(rps, "Requests")
+                    local direct_join = join_server or (requests and FindFirstChild(requests, "JoinPublicServer"))
+                    local target_job_id = not force_teleport_service and PickWatchdogServer(prefer_empty) or nil
+
+                    if direct_join and target_job_id then
+                        menu_recovery_attempted_servers[target_job_id] = true
+                        pcall(function()
+                            if utility and utility.add_server_to_history then
+                                utility:add_server_to_history(target_job_id)
+                            end
+                        end)
+                        warn(string.format("[SESSION WATCHDOG] Direct JoinPublicServer -> %s (attempt %d)", target_job_id, attempt_number))
+                        pcall(function()
+                            direct_join:FireServer(target_job_id)
+                        end)
+                    else
+                        -- Final independent fallback. This does not depend on utility:Serverhop,
+                        -- JoinPublicServer, hop_in_progress, or the path coroutine returning.
+                        warn(string.format("[SESSION WATCHDOG] TeleportService fallback (attempt %d)", attempt_number))
+                        pcall(function()
+                            tps:Teleport(game.PlaceId, plr)
+                        end)
+                    end
+
+                    -- If teleport succeeds this script will disappear / JobId will change. If it did
+                    -- not, release the debounce so the heartbeat watchdog can choose another server.
+                    task.wait(2)
+                    if game.JobId == starting_job_id then
+                        menu_recovery_busy = false
+                    end
+                end)
+
+                return true
+            end
+
+            -- Per-hop watchdog. Unlike the old version, this intentionally does NOT stop just because
+            -- hop_in_progress=true; that exact stale flag was the cause of permanent menu hangs.
             local function StartMenuServerhopWatchdog(prefer_empty)
                 menu_serverhop_watchdog_token = menu_serverhop_watchdog_token + 1
                 local my_token = menu_serverhop_watchdog_token
@@ -14028,32 +14206,20 @@ end
                         and my_token == menu_serverhop_watchdog_token
                         and game.JobId == starting_job_id do
 
+                        if not IsTrinketBotSessionActive() then
+                            break
+                        end
+
                         local player_gui = plr:FindFirstChild("PlayerGui")
                         local start_menu = player_gui and FindFirstChild(player_gui, "StartMenu")
 
                         if start_menu then
-                            if not menu_since then
-                                menu_since = tick()
-                            elseif tick() - menu_since >= MENU_SERVERHOP_TIMEOUT then
-                                -- Do not overlap the main TrinketBotServerhop attempt.
-                                if not trinket_bot.hop_in_progress then
-                                    library:Notify("Stuck in menu for 30s - retrying serverhop...")
-                                    warn("[SERVERHOP WATCHDOG] StartMenu active for 30s - retrying serverhop")
-
-                                    -- Reset before retry so another retry can happen after another 30s if needed.
-                                    menu_since = tick()
-
-                                    local ok, result = pcall(function()
-                                        return utility:Serverhop(prefer_empty)
-                                    end)
-
-                                    if not ok then
-                                        warn("[SERVERHOP WATCHDOG] Retry errored: " .. tostring(result))
-                                    end
-                                end
+                            menu_since = menu_since or tick()
+                            local menu_age = tick() - menu_since
+                            if menu_age >= MENU_SERVERHOP_TIMEOUT then
+                                ForceSessionMenuServerhop(prefer_empty, "per-hop watchdog", menu_age)
                             end
                         else
-                            -- Only count time actually spent in StartMenu.
                             menu_since = nil
                         end
 
@@ -15265,46 +15431,87 @@ end
                     end
                 end)))
 
-                -- Watchdog: bot stuck at menu (path stopped, no hop in progress) for too long -> force hop, then kick
+                -- Continuous Trinket Bot session watchdog.
+                -- Covers the state machine between path -> ReturnToMenu -> server transition.
+                -- It deliberately keeps checking while hop_in_progress=true because that flag can be stale.
                 do
-                    local stuck_timer_start = nil
-                    local forced_retry_count = 0
+                    local menu_since = nil
+                    local transition_since = nil
+                    local last_seen_job_id = game.JobId
+                    local last_transition_repair = 0
+
                     track_connection("stuck_menu_watchdog", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
-                        if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then
-                            stuck_timer_start = nil
-                            forced_retry_count = 0
+                        if not IsTrinketBotSessionActive() then
+                            menu_since = nil
+                            transition_since = nil
+                            if menu_recovery_job_id ~= game.JobId then
+                                ResetMenuServerhopRecovery()
+                            end
                             return
                         end
 
-                        if trinket_bot.path_running or trinket_bot.hop_in_progress then
-                            stuck_timer_start = nil
-                            forced_retry_count = 0
+                        if last_seen_job_id ~= game.JobId then
+                            last_seen_job_id = game.JobId
+                            menu_since = nil
+                            transition_since = nil
+                            ResetMenuServerhopRecovery()
                             return
                         end
 
-                        if not stuck_timer_start then
-                            stuck_timer_start = tick()
+                        if not CanSessionWatchdogHop() then
+                            menu_since = nil
+                            transition_since = nil
                             return
                         end
 
-                        local stuck_duration = tick() - stuck_timer_start
+                        local player_gui = plr:FindFirstChild("PlayerGui")
+                        local start_menu = player_gui and FindFirstChild(player_gui, "StartMenu")
 
-                        if stuck_duration > 15 and forced_retry_count < 2 then
-                            forced_retry_count = forced_retry_count + 1
-                            stuck_timer_start = tick()
-                            warn(string.format("[WATCHDOG] Bot stuck at menu for 15s+ (attempt %d/2) - forcing serverhop", forced_retry_count))
-                            pcall(function()
-                                utility:plain_webhook(string.format("@here WATCHDOG: Bot stuck at menu 15s+ - forcing serverhop (attempt %d/2)", forced_retry_count))
-                            end)
-                            task.spawn(function()
-                                TrinketBotServerhop("Watchdog: recovered from stuck menu state", true, true)
-                            end)
-                        elseif stuck_duration > 15 and forced_retry_count >= 2 then
-                            warn("[WATCHDOG] Bot still stuck after 2 forced hop attempts - kicking")
-                            pcall(function()
-                                utility:plain_webhook("@here WATCHDOG: Bot still stuck after 2 forced hops - kicking")
-                            end)
-                            plr:Kick("Watchdog: stuck at menu after repeated forced serverhop attempts")
+                        if start_menu then
+                            transition_since = nil
+                            menu_since = menu_since or tick()
+                            local menu_age = tick() - menu_since
+
+                            -- Always recover a stuck menu, even if path_running/hop_in_progress are stale.
+                            if menu_age >= MENU_SERVERHOP_TIMEOUT then
+                                ForceSessionMenuServerhop(true, "continuous StartMenu watchdog", menu_age)
+                            end
+                            return
+                        end
+
+                        -- Leaving StartMenu means either spawn succeeded or a teleport is beginning.
+                        if menu_since then
+                            menu_since = nil
+                            ResetMenuServerhopRecovery()
+                        end
+
+                        -- Secondary transition watchdog: path already stopped and a hop claims to be
+                        -- running, but StartMenu never appears. Repair ReturnToMenu periodically rather
+                        -- than allowing the bot to sit in an invisible/half-transition state forever.
+                        if not trinket_bot.path_running and trinket_bot.hop_in_progress then
+                            transition_since = transition_since or tick()
+                            local transition_age = tick() - transition_since
+
+                            if transition_age >= 18 and tick() - last_transition_repair >= 8 then
+                                last_transition_repair = tick()
+                                warn(string.format("[SESSION WATCHDOG] Hop transition stuck %.1fs - re-requesting StartMenu", transition_age))
+                                pcall(function()
+                                    local requests = FindFirstChild(rps, "Requests")
+                                    local return_menu = requests and FindFirstChild(requests, "ReturnToMenu")
+                                    if return_menu then return_menu:InvokeServer() end
+                                end)
+                            end
+
+                            -- If even ReturnToMenu cannot produce a menu, use TeleportService directly.
+                            if transition_age >= 50 and tick() - menu_recovery_last_attempt >= MENU_DIRECT_RETRY_INTERVAL then
+                                menu_recovery_last_attempt = tick()
+                                warn("[SESSION WATCHDOG] No StartMenu after 50s of hop transition - TeleportService fallback")
+                                pcall(function()
+                                    tps:Teleport(game.PlaceId, plr)
+                                end)
+                            end
+                        else
+                            transition_since = nil
                         end
                     end)))
                 end
