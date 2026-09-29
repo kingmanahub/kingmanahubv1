@@ -12200,6 +12200,11 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 -- Highest-priority safety latch for emergency selected-item serverhops.
                 priority_emergency_hop = false,
 
+                -- Saved-path settings snapshot. When a path is loaded, settings stored inside
+                -- that path are authoritative for path-specific behavior (especially Kick on Trinket).
+                active_path_settings = nil,
+                active_path_settings_name = "",
+
                 -- Random-access path editor state
                 edit_mode_enabled = false,
                 selected_edit_point_index = nil,
@@ -12239,6 +12244,43 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             local kick_debounce = false
             local kick_after_path = false
             local kick_trinket_name = ""
+
+            local function normalize_kick_trinket_name(value)
+                return tostring(value or ""):gsub("%s+", ""):lower()
+            end
+
+            local function get_active_path_kick_settings()
+                -- Once a Saved Path is loaded, NEVER let stale MemStorage/global UI state
+                -- silently override that path's own Kick-on-Trinket configuration.
+                local path_settings = trinket_bot.active_path_settings
+                if type(path_settings) == "table" and trinket_bot.active_path_settings_name ~= "" then
+                    local enabled = path_settings.kick_on_trinket == true
+                    local selected = type(path_settings.kick_trinket_list) == "table" and path_settings.kick_trinket_list or {}
+                    return enabled, selected, "path:" .. trinket_bot.active_path_settings_name
+                end
+
+                -- Do not evaluate backpack ChildAdded events until ExecutePath/load_path_by_name
+                -- has armed an authoritative settings snapshot. This prevents inventory restoration
+                -- on a fresh server from triggering Kick-on-Trinket using stale/default UI values.
+                return false, {}, "path-settings-not-ready"
+            end
+
+            local function kick_selection_contains(selected, item_name)
+                if type(selected) ~= "table" then return false end
+                local wanted = normalize_kick_trinket_name(item_name)
+                for key, value in pairs(selected) do
+                    local configured_name = nil
+                    if type(key) == "string" and value then
+                        configured_name = key
+                    elseif type(value) == "string" then
+                        configured_name = value
+                    end
+                    if configured_name and normalize_kick_trinket_name(configured_name) == wanted then
+                        return true, configured_name
+                    end
+                end
+                return false
+            end
 
             local proximity_warnings = {}
             local mana_initialized = false
@@ -14968,6 +15010,17 @@ end
                 if trinket_bot.path_running then
                     library:Notify("Path already running!")
                     return
+                end
+
+                -- Unsaved/manual paths do not have a JSON settings snapshot. Arm one now from
+                -- the live controls so backpack monitoring cannot fire before the path actually starts.
+                if type(trinket_bot.active_path_settings) ~= "table" then
+                    trinket_bot.active_path_settings = {
+                        kick_on_trinket = Toggles.KickOnTrinket and Toggles.KickOnTrinket.Value or false,
+                        kick_trinket_list = Options.KickTrinketList and Options.KickTrinketList.Value or {}
+                    }
+                    trinket_bot.active_path_settings_name = trinket_bot.current_path_name ~= ""
+                        and trinket_bot.current_path_name or "__manual_session__"
                 end
 
                 trinket_bot.path_running = true
@@ -19172,7 +19225,11 @@ end
                         })
                     end
 
-                    apply_settings(save_data.settings)
+                    -- Snapshot path-specific settings BEFORE botting. This is the source of truth
+                    -- for behaviors that must belong to this exact Saved Path.
+                    trinket_bot.active_path_settings = type(save_data.settings) == "table" and save_data.settings or {}
+                    trinket_bot.active_path_settings_name = path_name
+                    apply_settings(trinket_bot.active_path_settings)
 
                     library:Notify(string.format("Loaded path '%s' with %d points", path_name, #trinket_bot.path_points))
                     update_path_label(path_name)
@@ -19304,7 +19361,7 @@ end
                             plr:Kick("HRP never loaded during auto-start")
                             return
                         end
-                        task.wait(1)
+                        task.wait(0.1)
 
                         local auto_start_death_connection
                         local character = plr.Character
@@ -19343,6 +19400,21 @@ end
                             return
                         end
 
+                        -- SPAWN GRACE: after pressing Play and receiving Character + HRP, give Roblox/UI
+                        -- five full seconds to finish initializing before any recovery movement or point 1.
+                        library:Notify("Spawned - waiting 5 seconds before starting Trinket Bot...")
+                        local spawn_grace_deadline = tick() + 5
+                        while tick() < spawn_grace_deadline do
+                            if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then
+                                return
+                            end
+                            if not plr.Character or not plr.Character:FindFirstChild("HumanoidRootPart") then
+                                warn("[AUTO-START] Character/HRP disappeared during 5s spawn grace")
+                                return
+                            end
+                            task.wait(0.1)
+                        end
+
                         local saved_path = mem:GetItem("trinket_bot_path")
                         if not saved_path or saved_path == "" then
                             if auto_start_death_connection then
@@ -19373,16 +19445,10 @@ end
                             return
                         end
 
-                        if mem:HasItem("trinket_bot_settings") then
-                            local httpService = Services.HttpService
-                            local success, settings = pcall(function()
-                                return httpService:JSONDecode(mem:GetItem("trinket_bot_settings"))
-                            end)
-
-                            if success then
-                                apply_settings(settings)
-                            end
-                        end
+                        -- IMPORTANT: do NOT re-apply trinket_bot_settings here.
+                        -- load_path_by_name() already applied the settings stored inside the selected Saved Path.
+                        -- Re-applying MemStorage here used to overwrite path-specific Kick-on-Trinket choices
+                        -- (for example enabling Rift Gem from an older/different path).
 
                         local saved_position = nil
                         if mem:HasItem("lastPlayerPosition") then
@@ -19995,6 +20061,8 @@ end
                 Func = function()
                     trinket_bot.path_points = {}
                     trinket_bot.selected_edit_point_index = nil
+                    trinket_bot.active_path_settings = nil
+                    trinket_bot.active_path_settings_name = ""
                     free_drag.active = false
                     update_path_label(nil)
                     update_visualizations()
@@ -20120,6 +20188,9 @@ end
                             library:Notify(string.format("Saved path '%s' with %d points", path_name, #trinket_bot.path_points))
                         end
 
+                        -- The just-saved settings now become the authoritative snapshot for this path.
+                        trinket_bot.active_path_settings = save_data.settings
+                        trinket_bot.active_path_settings_name = path_name
                         update_path_label(path_name)
                         if Options.SavedPaths then
                             local paths = get_saved_paths()
@@ -20698,16 +20769,17 @@ end
 
                     task.wait(0.05)
 
-                    if not kick_debounce and Toggles.KickOnTrinket and Toggles.KickOnTrinket.Value and Options.KickTrinketList and Options.KickTrinketList.Value then
-                        local selected_trinkets = Options.KickTrinketList.Value
-                        for trinket_name, _ in next, selected_trinkets do
-                            if obj.Name:gsub(" ", "") == trinket_name:gsub(" ", "") then
+                    if not kick_debounce then
+                        local kick_enabled, selected_trinkets, settings_source = get_active_path_kick_settings()
+                        if kick_enabled then
+                            local matched, configured_name = kick_selection_contains(selected_trinkets, obj.Name)
+                            if matched then
                                 kick_debounce = true
                                 kick_after_path = true
-                                kick_trinket_name = trinket_name
-                                print(string.format("[Kick on Trinket] MATCH FOUND: %s - will kick after reaching last point", obj.Name))
-                                utility:plain_webhook(string.format("@here %s found! Going to last point then kicking.", trinket_name))
-                                library:Notify(string.format("%s found! Going to last point...", trinket_name))
+                                kick_trinket_name = configured_name or obj.Name
+                                print(string.format("[Kick on Trinket] MATCH FOUND: %s (source=%s) - will kick after reaching last point", obj.Name, settings_source))
+                                utility:plain_webhook(string.format("@here %s found! Going to last point then kicking. [%s]", kick_trinket_name, settings_source))
+                                library:Notify(string.format("%s found! Going to last point...", kick_trinket_name))
                                 return
                             end
                         end
