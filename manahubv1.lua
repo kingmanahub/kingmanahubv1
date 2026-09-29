@@ -12197,6 +12197,9 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 last_path_position = nil,
                 path_watchdog_busy = false,
 
+                -- Highest-priority safety latch for emergency selected-item serverhops.
+                priority_emergency_hop = false,
+
                 -- Random-access path editor state
                 edit_mode_enabled = false,
                 selected_edit_point_index = nil,
@@ -14027,7 +14030,7 @@ end
             -- Never trust hop_in_progress by itself: if a Serverhop coroutine stalls, that flag can
             -- stay true forever. During an active Trinket Bot session we instead watch the actual
             -- StartMenu + JobId and force an independent join attempt when no transition happens.
-            local MENU_SERVERHOP_TIMEOUT = 12
+            local MENU_SERVERHOP_TIMEOUT = 30
             local MENU_DIRECT_RETRY_INTERVAL = 7
             local MENU_TELEPORT_FALLBACK_AFTER = 45
             local menu_serverhop_watchdog_token = 0
@@ -14036,6 +14039,8 @@ end
             local menu_recovery_attempt_count = 0
             local menu_recovery_attempted_servers = {}
             local menu_recovery_job_id = game.JobId
+            local menu_force_loop_running = false
+            local menu_force_loop_job_id = nil
 
             local function ResetMenuServerhopRecovery()
                 menu_recovery_busy = false
@@ -14109,7 +14114,7 @@ end
                 return candidates[math.random(1, #candidates)].job_id
             end
 
-            local function ForceSessionMenuServerhop(prefer_empty, source, menu_age)
+            local function ForceSessionMenuServerhop(prefer_empty, source, menu_age, priority_mode)
                 if not CanSessionWatchdogHop() then return false end
                 if menu_recovery_busy then return false end
 
@@ -14130,25 +14135,24 @@ end
                 local attempt_number = menu_recovery_attempt_count
                 local age = tonumber(menu_age) or 0
 
-                -- A stale hop flag is diagnostic state, not proof a teleport is still progressing.
-                -- Clear it once the menu has demonstrably been stuck long enough so other recovery
-                -- paths cannot remain blocked forever.
                 if trinket_bot.hop_in_progress and age >= MENU_SERVERHOP_TIMEOUT then
                     warn(string.format("[SESSION WATCHDOG] Clearing stale hop_in_progress after %.1fs in StartMenu", age))
                     trinket_bot.hop_in_progress = false
                 end
                 trinket_bot.path_running = false
 
-                pcall(function()
-                    library:Notify(string.format("SESSION WATCHDOG: menu stuck %.0fs - recovery #%d", age, attempt_number))
-                end)
-                pcall(function()
-                    utility:plain_webhook(string.format("@here SESSION WATCHDOG: %s; StartMenu stuck %.0fs; recovery #%d", tostring(source or "unknown"), age, attempt_number))
-                end)
+                -- Normal watchdog diagnostics can happen before recovery. Priority emergency mode
+                -- deliberately delays UI/webhook work until AFTER the join/teleport request is sent.
+                if not priority_mode then
+                    pcall(function()
+                        library:Notify(string.format("SESSION WATCHDOG: menu stuck %.0fs - recovery #%d", age, attempt_number))
+                    end)
+                    pcall(function()
+                        utility:plain_webhook(string.format("@here SESSION WATCHDOG: %s; StartMenu stuck %.0fs; recovery #%d", tostring(source or "unknown"), age, attempt_number))
+                    end)
+                end
 
                 task.spawn(function()
-                    -- We are already in/near StartMenu, but re-request it in case the client is in a
-                    -- half-transition state. InvokeServer is wrapped so a broken remote cannot kill the watchdog.
                     pcall(function()
                         local requests = FindFirstChild(rps, "Requests")
                         local return_menu = requests and FindFirstChild(requests, "ReturnToMenu")
@@ -14173,16 +14177,23 @@ end
                             direct_join:FireServer(target_job_id)
                         end)
                     else
-                        -- Final independent fallback. This does not depend on utility:Serverhop,
-                        -- JoinPublicServer, hop_in_progress, or the path coroutine returning.
                         warn(string.format("[SESSION WATCHDOG] TeleportService fallback (attempt %d)", attempt_number))
                         pcall(function()
                             tps:Teleport(game.PlaceId, plr)
                         end)
                     end
 
-                    -- If teleport succeeds this script will disappear / JobId will change. If it did
-                    -- not, release the debounce so the heartbeat watchdog can choose another server.
+                    if priority_mode then
+                        task.defer(function()
+                            pcall(function()
+                                library:Notify(string.format("PRIORITY SERVERHOP: %s", tostring(source or "dangerous item detected")))
+                            end)
+                            pcall(function()
+                                utility:plain_webhook(string.format("@here PRIORITY SERVERHOP: %s", tostring(source or "dangerous item detected")))
+                            end)
+                        end)
+                    end
+
                     task.wait(2)
                     if game.JobId == starting_job_id then
                         menu_recovery_busy = false
@@ -14190,6 +14201,73 @@ end
                 end)
 
                 return true
+            end
+
+            -- Once StartMenu has been idle for 30s, loop serverhop attempts until this client
+            -- ACTUALLY changes JobId. The only same-server escape is a successful Play that
+            -- removes StartMenu and restarts the loot path.
+            local function StartSessionHopLoop(prefer_empty, source, initial_menu_age, priority_mode)
+                local starting_job_id = game.JobId
+                if menu_force_loop_running and menu_force_loop_job_id == starting_job_id then
+                    return
+                end
+
+                menu_force_loop_running = true
+                menu_force_loop_job_id = starting_job_id
+
+                task.spawn(function()
+                    local loop_started = tick() - math.max(tonumber(initial_menu_age) or 0, MENU_SERVERHOP_TIMEOUT)
+                    local attempt = 0
+
+                    while shared and not shared.is_unloading
+                        and IsTrinketBotSessionActive()
+                        and game.JobId == starting_job_id do
+
+                        if not CanSessionWatchdogHop() then break end
+
+                        local player_gui = plr:FindFirstChild("PlayerGui")
+                        local start_menu = player_gui and FindFirstChild(player_gui, "StartMenu")
+
+                        -- If Play succeeded and looting resumed, this is no longer a stuck-menu case.
+                        if not start_menu and trinket_bot.path_running and not trinket_bot.priority_emergency_hop then
+                            warn("[SESSION WATCHDOG] Play succeeded and loot path resumed - ending forced hop loop")
+                            break
+                        end
+
+                        attempt = attempt + 1
+                        local stuck_age = math.max(MENU_SERVERHOP_TIMEOUT, tick() - loop_started)
+                        trinket_bot.hop_in_progress = false
+                        ForceSessionMenuServerhop(
+                            prefer_empty,
+                            source or "30s StartMenu forced loop",
+                            stuck_age,
+                            priority_mode == true
+                        )
+
+                        local wait_until = tick() + MENU_DIRECT_RETRY_INTERVAL
+                        while tick() < wait_until and game.JobId == starting_job_id do
+                            if not IsTrinketBotSessionActive() then break end
+                            local gui_now = plr:FindFirstChild("PlayerGui")
+                            local menu_now = gui_now and FindFirstChild(gui_now, "StartMenu")
+                            if not menu_now and trinket_bot.path_running and not trinket_bot.priority_emergency_hop then
+                                break
+                            end
+                            task.wait(0.25)
+                        end
+
+                        if game.JobId ~= starting_job_id then break end
+                        local gui_now = plr:FindFirstChild("PlayerGui")
+                        local menu_now = gui_now and FindFirstChild(gui_now, "StartMenu")
+                        if not menu_now and trinket_bot.path_running and not trinket_bot.priority_emergency_hop then
+                            break
+                        end
+                    end
+
+                    if menu_force_loop_job_id == starting_job_id then
+                        menu_force_loop_running = false
+                        menu_force_loop_job_id = nil
+                    end
+                end)
             end
 
             -- Per-hop watchdog. Unlike the old version, this intentionally does NOT stop just because
@@ -14217,7 +14295,7 @@ end
                             menu_since = menu_since or tick()
                             local menu_age = tick() - menu_since
                             if menu_age >= MENU_SERVERHOP_TIMEOUT then
-                                ForceSessionMenuServerhop(prefer_empty, "per-hop watchdog", menu_age)
+                                StartSessionHopLoop(prefer_empty, "per-hop watchdog", menu_age, false)
                             end
                         else
                             menu_since = nil
@@ -14828,6 +14906,12 @@ end
                 test_mode = test_mode or false
                 trinket_bot.test_mode = test_mode
 
+                if trinket_bot.priority_emergency_hop then
+                    trinket_bot.path_running = false
+                    warn("[PRIORITY HOP] ExecutePath blocked until server transition completes")
+                    return
+                end
+
                 droppedTools = {}
                 currently_dropping = false
 
@@ -15261,28 +15345,84 @@ end
 
                 local emergency_serverhop_connection
                 local emergency_conditions = Options.EmergencyServerhopConditions and Options.EmergencyServerhopConditions.Value or {}
+                local emergency_priority_hop_sent = false
+
+                local function PriorityEmergencyServerhop(item_name, owner_player, source)
+                    if emergency_priority_hop_sent or trinket_bot.priority_emergency_hop then return end
+                    if not IsTrinketBotSessionActive() then return end
+                    if Toggles.StayInServer and Toggles.StayInServer.Value then return end
+
+                    emergency_priority_hop_sent = true
+                    trinket_bot.priority_emergency_hop = true
+
+                    -- Stop every normal action synchronously BEFORE doing diagnostics.
+                    trinket_bot.path_running = false
+                    trinket_bot.path_watchdog_busy = false
+                    trinket_bot.gate_in_progress = false
+                    emergency_gate_requested = nil
+                    currently_dropping = false
+
+                    if active_tween_data.tween then
+                        pcall(function() active_tween_data.tween:Cancel() end)
+                        active_tween_data.tween = nil
+                    end
+                    if active_tween_data.connection then
+                        pcall(function() active_tween_data.connection:Disconnect() end)
+                        active_tween_data.connection = nil
+                    end
+                    active_tween_data.target_position = nil
+
+                    pcall(function()
+                        local char = plr.Character
+                        local hum = char and FindFirstChildOfClass(char, "Humanoid")
+                        if hum then hum:UnequipTools() end
+                    end)
+
+                    local owner_name = owner_player and owner_player.Name or "Unknown"
+                    local owner_id = owner_player and owner_player.UserId or "unknown"
+                    local reason = string.format(
+                        "%s detected on %s (%s)",
+                        tostring(item_name), tostring(owner_name), tostring(owner_id)
+                    )
+
+                    -- Preserve enough state to resume after the new server loads.
+                    if trinket_bot.current_path_name and trinket_bot.current_path_name ~= "" then
+                        pcall(function() mem:SetItem("trinket_bot_path", trinket_bot.current_path_name) end)
+                    end
+                    if plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") then
+                        local pos = plr.Character.HumanoidRootPart.Position
+                        pcall(function()
+                            mem:SetItem("lastPlayerPosition", string.format("%s,%s,%s", pos.X, pos.Y, pos.Z))
+                        end)
+                    end
+
+                    -- HOP FIRST: this loop sends ReturnToMenu/JoinPublicServer immediately and keeps
+                    -- retrying until JobId changes. Its priority_mode delays Notify/webhook until
+                    -- after the first join/teleport request has already been sent.
+                    StartSessionHopLoop(true, "Emergency item " .. reason, MENU_SERVERHOP_TIMEOUT, true)
+                end
 
                 if next(emergency_conditions) ~= nil then
-                    local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
-                    if not stay_in_server then
+                    if not (Toggles.StayInServer and Toggles.StayInServer.Value) then
+                        -- Detect already-equipped selected tools when this bot run starts.
                         for _, other_player in next, plrs:GetPlayers() do
                             if other_player ~= plr and other_player.Character then
                                 for _, tool in next, other_player.Character:GetChildren() do
                                     if tool:IsA("Tool") and emergency_conditions[tool.Name] then
-                                        library:Notify(string.format("Player %s already has %s - instant serverhop!", other_player.Name, tool.Name))
-                                        trinket_bot.path_running = false
-                                        TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop (detected on bot start)", other_player.Name, other_player.UserId, tool.Name), nil, true)
+                                        PriorityEmergencyServerhop(tool.Name, other_player, "initial equipped scan")
                                         break
                                     end
                                 end
                             end
+                            if emergency_priority_hop_sent then break end
                         end
                     end
 
                     emergency_serverhop_connection = track_connection("emergency_serverhop", utility:Connection(ws.Live.DescendantAdded, function(descendant)
-                        if not trinket_bot.path_running then return end
-                        local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
-                        if stay_in_server then return end
+                        -- Whole botting session, not only while path_running=true.
+                        if not IsTrinketBotSessionActive() then return end
+                        if emergency_priority_hop_sent or trinket_bot.priority_emergency_hop then return end
+                        if Toggles.StayInServer and Toggles.StayInServer.Value then return end
 
                         if descendant:IsA("Tool") and emergency_conditions[descendant.Name] then
                             local owner_player = nil
@@ -15296,14 +15436,9 @@ end
                                 ancestor = ancestor.Parent
                             end
 
+                            -- Dropdown condition only triggers for another player's equipped tool.
                             if owner_player and owner_player ~= plr then
-                                library:Notify(string.format("Player %s has %s - instant serverhop!", owner_player.Name, descendant.Name))
-                                trinket_bot.path_running = false
-                                TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop", owner_player.Name, owner_player.UserId, descendant.Name), nil, true)
-                            elseif not owner_player then
-                                library:Notify(string.format("Dangerous item %s detected in server - instant serverhop!", descendant.Name))
-                                trinket_bot.path_running = false
-                                TrinketBotServerhop(string.format("Dangerous item %s detected in server - instant serverhop (no owner identified)", descendant.Name), nil, true)
+                                PriorityEmergencyServerhop(descendant.Name, owner_player, "Live.DescendantAdded")
                             end
                         end
                     end))
@@ -15474,7 +15609,7 @@ end
 
                             -- Always recover a stuck menu, even if path_running/hop_in_progress are stale.
                             if menu_age >= MENU_SERVERHOP_TIMEOUT then
-                                ForceSessionMenuServerhop(true, "continuous StartMenu watchdog", menu_age)
+                                StartSessionHopLoop(true, "continuous StartMenu watchdog", menu_age, false)
                             end
                             return
                         end
