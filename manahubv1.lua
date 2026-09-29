@@ -20819,16 +20819,43 @@ end
                             local matched, configured_name = kick_selection_contains(selected_trinkets, obj.Name)
                             if matched then
                                 kick_debounce = true
-                                kick_after_path = true
+                                kick_after_path = false
                                 kick_trinket_name = configured_name or obj.Name
+
+                                -- Kick on Trinket is terminal. Once the selected item is confirmed in
+                                -- Backpack, freeze every Trinket Bot action and let no watchdog/serverhop
+                                -- interrupt. Notify first so the pickup is visible; Kick() is the FINAL action.
                                 trinket_bot.artifact_kick_flow_active = true
-                                -- Artifact/selected-item kick flow owns the bot now: no watchdog/serverhop
-                                -- is allowed to interrupt the normal "finish path -> kick" procedure.
+                                trinket_bot.path_running = false
                                 trinket_bot.hop_in_progress = false
                                 trinket_bot.path_watchdog_busy = false
-                                print(string.format("[Kick on Trinket] MATCH FOUND: %s (source=%s) - will kick after reaching last point; watchdog/serverhop suppressed", obj.Name, settings_source))
-                                utility:plain_webhook(string.format("@here %s found! Going to last point then kicking. [%s]", kick_trinket_name, settings_source))
-                                library:Notify(string.format("%s found! Going to last point...", kick_trinket_name))
+                                trinket_bot.gate_in_progress = false
+                                emergency_gate_requested = nil
+
+                                if active_tween_data.tween then
+                                    pcall(function() active_tween_data.tween:Cancel() end)
+                                    active_tween_data.tween = nil
+                                end
+                                if active_tween_data.connection then
+                                    pcall(function() active_tween_data.connection:Disconnect() end)
+                                    active_tween_data.connection = nil
+                                end
+                                active_tween_data.target_position = nil
+
+                                print(string.format("[Kick on Trinket] MATCH FOUND: %s (source=%s) - terminal kick", obj.Name, settings_source))
+                                pcall(function()
+                                    library:Notify(string.format("Picked up %s - kicking now", kick_trinket_name), 5)
+                                end)
+                                pcall(function()
+                                    utility:plain_webhook(string.format("@here Picked up %s - Kick on Trinket triggered. [%s]", kick_trinket_name, settings_source))
+                                end)
+
+                                -- Briefly leave the pickup notification visible. Do not perform any
+                                -- movement, Gate, serverhop, retry, or recovery during this hold.
+                                task.wait(0.75)
+
+                                -- FINAL ACTION: after this call there must be no further bot action.
+                                plr:Kick(string.format("Kick on Trinket: picked up %s", kick_trinket_name))
                                 return
                             end
                         end
