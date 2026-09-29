@@ -12200,6 +12200,11 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 -- Highest-priority safety latch for emergency selected-item serverhops.
                 priority_emergency_hop = false,
 
+                -- Once Kick on Trinket matches an Artifact/selected item, this latches the
+                -- normal "finish path -> kick" flow. While active, Trinket Bot watchdogs
+                -- and serverhop paths are not allowed to interrupt that flow.
+                artifact_kick_flow_active = false,
+
                 -- Saved-path settings snapshot. When a path is loaded, settings stored inside
                 -- that path are authoritative for path-specific behavior (especially Kick on Trinket).
                 active_path_settings = nil,
@@ -14072,9 +14077,9 @@ end
             -- Never trust hop_in_progress by itself: if a Serverhop coroutine stalls, that flag can
             -- stay true forever. During an active Trinket Bot session we instead watch the actual
             -- StartMenu + JobId and force an independent join attempt when no transition happens.
-            local MENU_SERVERHOP_TIMEOUT = 30
-            local MENU_DIRECT_RETRY_INTERVAL = 7
-            local MENU_TELEPORT_FALLBACK_AFTER = 45
+            local MENU_SERVERHOP_TIMEOUT = 10
+            local MENU_DIRECT_RETRY_INTERVAL = 10
+            local MENU_TELEPORT_FALLBACK_AFTER = math.huge -- no timed escalation; retry random server every 10s
             local menu_serverhop_watchdog_token = 0
             local menu_recovery_busy = false
             local menu_recovery_last_attempt = 0
@@ -14100,6 +14105,7 @@ end
                 if not IsTrinketBotSessionActive() then return false end
                 if shared and shared.is_unloading then return false end
                 if trinket_bot.test_mode then return false end
+                if trinket_bot.artifact_kick_flow_active then return false end
                 if Toggles.StayInServer and Toggles.StayInServer.Value then return false end
                 return true
             end
@@ -14202,10 +14208,10 @@ end
                     end)
                     task.wait(0.15)
 
-                    local force_teleport_service = age >= MENU_TELEPORT_FALLBACK_AFTER or attempt_number >= 5
                     local requests = FindFirstChild(rps, "Requests")
                     local direct_join = join_server or (requests and FindFirstChild(requests, "JoinPublicServer"))
-                    local target_job_id = not force_teleport_service and PickWatchdogServer(prefer_empty) or nil
+                    -- Menu watchdog is intentionally simple: random server attempt every 10s.
+                    local target_job_id = PickWatchdogServer(false)
 
                     if direct_join and target_job_id then
                         menu_recovery_attempted_servers[target_job_id] = true
@@ -14214,12 +14220,13 @@ end
                                 utility:add_server_to_history(target_job_id)
                             end
                         end)
-                        warn(string.format("[SESSION WATCHDOG] Direct JoinPublicServer -> %s (attempt %d)", target_job_id, attempt_number))
+                        warn(string.format("[SESSION WATCHDOG] Random JoinPublicServer -> %s (attempt %d)", target_job_id, attempt_number))
                         pcall(function()
                             direct_join:FireServer(target_job_id)
                         end)
                     else
-                        warn(string.format("[SESSION WATCHDOG] TeleportService fallback (attempt %d)", attempt_number))
+                        -- Only a last-resort API fallback when ServerInfo/direct join is unavailable.
+                        warn(string.format("[SESSION WATCHDOG] No random ServerInfo target; TeleportService fallback (attempt %d)", attempt_number))
                         pcall(function()
                             tps:Teleport(game.PlaceId, plr)
                         end)
@@ -14245,9 +14252,8 @@ end
                 return true
             end
 
-            -- Once StartMenu has been idle for 30s, loop serverhop attempts until this client
-            -- ACTUALLY changes JobId. The only same-server escape is a successful Play that
-            -- removes StartMenu and restarts the loot path.
+            -- Once StartMenu has been idle for 10s, retry a RANDOM serverhop every 10s
+            -- until this client changes JobId. If Play succeeds and looting resumes, stop retrying.
             local function StartSessionHopLoop(prefer_empty, source, initial_menu_age, priority_mode)
                 local starting_job_id = game.JobId
                 if menu_force_loop_running and menu_force_loop_job_id == starting_job_id then
@@ -14281,7 +14287,7 @@ end
                         trinket_bot.hop_in_progress = false
                         ForceSessionMenuServerhop(
                             prefer_empty,
-                            source or "30s StartMenu forced loop",
+                            source or "10s StartMenu random retry loop",
                             stuck_age,
                             priority_mode == true
                         )
@@ -14337,7 +14343,7 @@ end
                             menu_since = menu_since or tick()
                             local menu_age = tick() - menu_since
                             if menu_age >= MENU_SERVERHOP_TIMEOUT then
-                                StartSessionHopLoop(prefer_empty, "per-hop watchdog", menu_age, false)
+                                StartSessionHopLoop(false, "per-hop watchdog", menu_age, false)
                             end
                         else
                             menu_since = nil
@@ -14707,6 +14713,11 @@ end
             end
 
             local function TrinketBotServerhop(reason, skip_test_mode_check, prefer_empty)
+                if trinket_bot.artifact_kick_flow_active then
+                    warn(string.format("[KICK ON TRINKET] Serverhop suppressed while artifact kick flow is active: %s", tostring(reason or "Unknown")))
+                    return false
+                end
+
                 trinket_bot.hop_in_progress = true
                 local ok, err = pcall(function()
                     TrinketBotServerhop_Impl(reason, skip_test_mode_check, prefer_empty)
@@ -15025,6 +15036,9 @@ end
 
                 trinket_bot.path_running = true
                 trinket_bot.moderator_detected = false
+                if not kick_after_path then
+                    trinket_bot.artifact_kick_flow_active = false
+                end
                 -- Fresh path run: Hold Weapon is allowed until we actually enter a Gate point.
                 trinket_bot.gate_in_progress = false
 
@@ -15401,6 +15415,7 @@ end
                 local emergency_priority_hop_sent = false
 
                 local function PriorityEmergencyServerhop(item_name, owner_player, source)
+                    if trinket_bot.artifact_kick_flow_active then return end
                     if emergency_priority_hop_sent or trinket_bot.priority_emergency_hop then return end
                     if not IsTrinketBotSessionActive() then return end
                     if Toggles.StayInServer and Toggles.StayInServer.Value then return end
@@ -15619,19 +15634,16 @@ end
                     end
                 end)))
 
-                -- Continuous Trinket Bot session watchdog.
-                -- Covers the state machine between path -> ReturnToMenu -> server transition.
-                -- It deliberately keeps checking while hop_in_progress=true because that flag can be stale.
+                -- Continuous bot-session MENU watchdog only.
+                -- If StartMenu remains present for >10s, retry one RANDOM serverhop.
+                -- If still in the same menu, retry again every 10s. No transition escalation.
                 do
                     local menu_since = nil
-                    local transition_since = nil
                     local last_seen_job_id = game.JobId
-                    local last_transition_repair = 0
 
                     track_connection("stuck_menu_watchdog", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
                         if not IsTrinketBotSessionActive() then
                             menu_since = nil
-                            transition_since = nil
                             if menu_recovery_job_id ~= game.JobId then
                                 ResetMenuServerhopRecovery()
                             end
@@ -15641,14 +15653,18 @@ end
                         if last_seen_job_id ~= game.JobId then
                             last_seen_job_id = game.JobId
                             menu_since = nil
-                            transition_since = nil
                             ResetMenuServerhopRecovery()
+                            return
+                        end
+
+                        -- Artifact Kick-on-Trinket owns the session until it kicks.
+                        if trinket_bot.artifact_kick_flow_active then
+                            menu_since = nil
                             return
                         end
 
                         if not CanSessionWatchdogHop() then
                             menu_since = nil
-                            transition_since = nil
                             return
                         end
 
@@ -15656,50 +15672,17 @@ end
                         local start_menu = player_gui and FindFirstChild(player_gui, "StartMenu")
 
                         if start_menu then
-                            transition_since = nil
                             menu_since = menu_since or tick()
                             local menu_age = tick() - menu_since
-
-                            -- Always recover a stuck menu, even if path_running/hop_in_progress are stale.
                             if menu_age >= MENU_SERVERHOP_TIMEOUT then
-                                StartSessionHopLoop(true, "continuous StartMenu watchdog", menu_age, false)
+                                StartSessionHopLoop(false, "continuous StartMenu random retry", menu_age, false)
                             end
                             return
                         end
 
-                        -- Leaving StartMenu means either spawn succeeded or a teleport is beginning.
                         if menu_since then
                             menu_since = nil
                             ResetMenuServerhopRecovery()
-                        end
-
-                        -- Secondary transition watchdog: path already stopped and a hop claims to be
-                        -- running, but StartMenu never appears. Repair ReturnToMenu periodically rather
-                        -- than allowing the bot to sit in an invisible/half-transition state forever.
-                        if not trinket_bot.path_running and trinket_bot.hop_in_progress then
-                            transition_since = transition_since or tick()
-                            local transition_age = tick() - transition_since
-
-                            if transition_age >= 18 and tick() - last_transition_repair >= 8 then
-                                last_transition_repair = tick()
-                                warn(string.format("[SESSION WATCHDOG] Hop transition stuck %.1fs - re-requesting StartMenu", transition_age))
-                                pcall(function()
-                                    local requests = FindFirstChild(rps, "Requests")
-                                    local return_menu = requests and FindFirstChild(requests, "ReturnToMenu")
-                                    if return_menu then return_menu:InvokeServer() end
-                                end)
-                            end
-
-                            -- If even ReturnToMenu cannot produce a menu, use TeleportService directly.
-                            if transition_age >= 50 and tick() - menu_recovery_last_attempt >= MENU_DIRECT_RETRY_INTERVAL then
-                                menu_recovery_last_attempt = tick()
-                                warn("[SESSION WATCHDOG] No StartMenu after 50s of hop transition - TeleportService fallback")
-                                pcall(function()
-                                    tps:Teleport(game.PlaceId, plr)
-                                end)
-                            end
-                        else
-                            transition_since = nil
                         end
                     end)))
                 end
@@ -15715,6 +15698,30 @@ end
                     local last_sample_position = nil
                     local missing_root_since = nil
                     local gate_wait_since = nil
+                    local khei_gate_space_attempted = false
+                    local khei_gate_space_at = nil
+
+                    local function press_space_for_khei_gate_recovery()
+                        local character = plr.Character
+                        local humanoid = character and FindFirstChildOfClass(character, "Humanoid")
+
+                        pcall(function()
+                            if humanoid then
+                                humanoid.Sit = false
+                                humanoid.PlatformStand = false
+                                humanoid.Jump = true
+                                humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+                            end
+                        end)
+
+                        task.spawn(function()
+                            pcall(function()
+                                vim:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+                                task.wait(0.08)
+                                vim:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+                            end)
+                        end)
+                    end
 
                     local function force_path_watchdog_hop(reason)
                         if trinket_bot.path_watchdog_busy or trinket_bot.hop_in_progress then
@@ -15757,6 +15764,22 @@ end
                             no_progress_since = tick()
                             last_sample_position = nil
                             missing_root_since = nil
+                            gate_wait_since = nil
+                            khei_gate_space_attempted = false
+                            khei_gate_space_at = nil
+                            return
+                        end
+
+                        -- Once an Artifact/selected Kick-on-Trinket item is found, do not let
+                        -- any path watchdog or recovery serverhop interrupt the finish-and-kick flow.
+                        if trinket_bot.artifact_kick_flow_active then
+                            watched_point_index = -1
+                            no_progress_since = tick()
+                            last_sample_position = nil
+                            missing_root_since = nil
+                            gate_wait_since = nil
+                            khei_gate_space_attempted = false
+                            khei_gate_space_at = nil
                             return
                         end
 
@@ -15768,18 +15791,38 @@ end
                             return
                         end
 
-                        -- Gate has its own SnapCool/Danger/mana waits. Give it a generous window,
-                        -- but do not allow a stale Gate lock to suppress recovery forever.
+                        -- Gate has its own waits. In Khei, a bed/seated state can leave Gate stuck.
+                        -- Recovery policy: after 25s stuck, press Space once; if Gate still has not
+                        -- recovered 10s later, serverhop. If Gate clears, path continues normally.
                         if trinket_bot.gate_in_progress then
                             gate_wait_since = gate_wait_since or tick()
                             no_progress_since = tick()
                             last_sample_position = nil
-                            if tick() - gate_wait_since >= 60 then
+
+                            local gate_age = tick() - gate_wait_since
+                            if is_khei then
+                                if gate_age >= 25 and not khei_gate_space_attempted then
+                                    khei_gate_space_attempted = true
+                                    khei_gate_space_at = tick()
+                                    warn("[KHEI GATE WATCHDOG] Gate stuck 25s - pressing Space once before considering serverhop")
+                                    pcall(function()
+                                        library:Notify("Khei Gate stuck - jumping once to recover")
+                                    end)
+                                    press_space_for_khei_gate_recovery()
+                                elseif khei_gate_space_attempted
+                                    and khei_gate_space_at
+                                    and (tick() - khei_gate_space_at) >= 10
+                                then
+                                    force_path_watchdog_hop("Khei Gate still stuck 10s after Space recovery")
+                                end
+                            elseif gate_age >= 60 then
                                 force_path_watchdog_hop("Gate state stuck for 60s")
                             end
                             return
                         end
                         gate_wait_since = nil
+                        khei_gate_space_attempted = false
+                        khei_gate_space_at = nil
 
                         local character = plr.Character
                         local root_part = character and FindFirstChild(character, "HumanoidRootPart")
@@ -20278,6 +20321,7 @@ end
                         kick_after_path = false
                         kick_debounce = false
                         kick_trinket_name = ""
+                        trinket_bot.artifact_kick_flow_active = false
 
                         current_gate_section = 0
                         player_encounters = {}
@@ -20777,7 +20821,12 @@ end
                                 kick_debounce = true
                                 kick_after_path = true
                                 kick_trinket_name = configured_name or obj.Name
-                                print(string.format("[Kick on Trinket] MATCH FOUND: %s (source=%s) - will kick after reaching last point", obj.Name, settings_source))
+                                trinket_bot.artifact_kick_flow_active = true
+                                -- Artifact/selected-item kick flow owns the bot now: no watchdog/serverhop
+                                -- is allowed to interrupt the normal "finish path -> kick" procedure.
+                                trinket_bot.hop_in_progress = false
+                                trinket_bot.path_watchdog_busy = false
+                                print(string.format("[Kick on Trinket] MATCH FOUND: %s (source=%s) - will kick after reaching last point; watchdog/serverhop suppressed", obj.Name, settings_source))
                                 utility:plain_webhook(string.format("@here %s found! Going to last point then kicking. [%s]", kick_trinket_name, settings_source))
                                 library:Notify(string.format("%s found! Going to last point...", kick_trinket_name))
                                 return
