@@ -15595,44 +15595,218 @@ end
                     end)))
                 end
 
-                -- STRICT: in combat (Danger tag) + player within 450 studs = instant kick, no delay
-                -- uses botstarted (not path_running) so it stays active even mid-serverhop transition
-                track_connection("combat_proximity_kick", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
-                    if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then return end
+                -- KHEI BED ESCAPE WATCHER:
+                -- Do not wait until Gate() notices the problem. During a live bot session in Khei,
+                -- if the humanoid starts looking seated/platform-stood/laid sideways, immediately
+                -- pop it upright and send one Space press. A short cooldown prevents key spam while
+                -- still allowing another jump if a bed grabs the character again.
+                do
+                    local last_bed_escape_at = 0
+                    local BED_ESCAPE_COOLDOWN = 0.75
 
-                    local character = plr.Character
-                    if not character then return end
+                    local function looks_like_khei_bed_state(character, humanoid, root)
+                        if not character or not humanoid or not root then return false end
 
-                    local in_danger = cs:HasTag(character, "Danger") or FindFirstChild(character, "Danger")
-                    if not in_danger then return end
+                        local state = humanoid:GetState()
+                        local up_y = math.abs(root.CFrame.UpVector.Y)
+                        local laid_sideways = up_y < 0.55
+                        local has_seat = humanoid.SeatPart ~= nil
 
-                    local bot_hrp = FindFirstChild(character, "HumanoidRootPart")
-                    if not bot_hrp then return end
+                        return humanoid.Sit
+                            or humanoid.PlatformStand
+                            or has_seat
+                            or state == Enum.HumanoidStateType.Seated
+                            or state == Enum.HumanoidStateType.PlatformStanding
+                            or laid_sideways
+                    end
 
-                    for _, other_player in next, plrs:GetPlayers() do
-                        if other_player ~= plr then
-                            local other_hrp = other_player.Character and FindFirstChild(other_player.Character, "HumanoidRootPart")
-                            if other_hrp then
-                                local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
-                                if dist <= 450 then
-                                    trinket_bot.path_running = false
-                                    local message = string.format("In combat + player %s within %.0f studs - COMBAT LOG", other_player.Name, dist)
+                    local function jump_out_of_khei_bed(character, humanoid)
+                        if not character or not humanoid then return end
 
-                                    -- kick FIRST, immediately, nothing blocks this
-                                    plr:Kick(message)
+                        pcall(function()
+                            humanoid.Sit = false
+                            humanoid.PlatformStand = false
+                            humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+                            humanoid.Jump = true
+                        end)
 
-                                    -- fire notify/webhook after (non-blocking, best effort)
-                                    task.spawn(function()
-                                        pcall(function() library:Notify(message) end)
-                                        pcall(function() utility:plain_webhook(string.format("@here %s", message)) end)
-                                    end)
+                        task.spawn(function()
+                            pcall(function()
+                                if vim then
+                                    vim:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+                                    task.wait(0.06)
+                                    vim:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+                                end
+                            end)
 
-                                    return
+                            pcall(function()
+                                if humanoid and humanoid.Parent then
+                                    humanoid.Sit = false
+                                    humanoid.PlatformStand = false
+                                    humanoid.Jump = true
+                                    humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+                                end
+                            end)
+                        end)
+                    end
+
+                    track_connection("khei_bed_escape_watchdog", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
+                        if not is_khei then return end
+                        if shared.is_unloading then return end
+                        if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then return end
+
+                        local character = plr.Character
+                        local humanoid = character and FindFirstChildOfClass(character, "Humanoid")
+                        local root = character and FindFirstChild(character, "HumanoidRootPart")
+                        if not humanoid or not root then return end
+
+                        if looks_like_khei_bed_state(character, humanoid, root) then
+                            local now = tick()
+                            if now - last_bed_escape_at >= BED_ESCAPE_COOLDOWN then
+                                last_bed_escape_at = now
+                                warn(string.format(
+                                    "[KHEI BED] suspicious bed/lying state detected (state=%s Sit=%s PlatformStand=%s UpY=%.2f) - SPACE now",
+                                    tostring(humanoid:GetState()),
+                                    tostring(humanoid.Sit),
+                                    tostring(humanoid.PlatformStand),
+                                    math.abs(root.CFrame.UpVector.Y)
+                                ))
+                                jump_out_of_khei_bed(character, humanoid)
+                            end
+                        end
+                    end)))
+                end
+
+                -- STRICT COMBAT LOG:
+                -- Keep this alive for the entire bot session (not just while path_running=true).
+                -- Khei can expose combat through more than one state representation, so accept
+                -- Danger/InCombat/Combat as CollectionService tags, children, or boolean attributes.
+                -- If any non-local player is within 450 studs, use the cloned original Kick method
+                -- immediately; this avoids relying on a potentially hooked Player:Kick method.
+                do
+                    local COMBAT_LOG_RANGE = 450
+                    local combat_log_triggered = false
+
+                    local function has_truthy_combat_attribute(character, name)
+                        local ok, value = pcall(function()
+                            return character:GetAttribute(name)
+                        end)
+                        if not ok then return false end
+                        return value == true or value == 1 or value == "true" or value == "1"
+                    end
+
+                    local function is_character_in_combat(character)
+                        if not character then return false end
+
+                        local combat_names = {"Danger", "InCombat", "Combat", "CombatTag"}
+                        for _, name in ipairs(combat_names) do
+                            local tagged = false
+                            pcall(function()
+                                tagged = cs:HasTag(character, name)
+                            end)
+                            if tagged then return true end
+
+                            local child = nil
+                            pcall(function()
+                                child = character:FindFirstChild(name, true)
+                            end)
+                            if child then return true end
+
+                            if has_truthy_combat_attribute(character, name) then
+                                return true
+                            end
+                        end
+
+                        -- Last-resort compatibility: if Khei changes the exact tag spelling,
+                        -- accept a character tag whose name clearly denotes combat/danger.
+                        local ok, tags = pcall(function() return cs:GetTags(character) end)
+                        if ok and type(tags) == "table" then
+                            for _, tag in ipairs(tags) do
+                                local lower = tostring(tag):lower():gsub("[%s_%-]", "")
+                                if lower == "danger"
+                                    or lower == "incombat"
+                                    or lower == "combat"
+                                    or lower == "combattag"
+                                then
+                                    return true
                                 end
                             end
                         end
+
+                        return false
                     end
-                end)))
+
+                    local function trigger_combat_log(other_player, dist)
+                        if combat_log_triggered then return end
+                        combat_log_triggered = true
+
+                        trinket_bot.path_running = false
+
+                        if active_tween_data.tween then
+                            pcall(function() active_tween_data.tween:Cancel() end)
+                            active_tween_data.tween = nil
+                        end
+                        if active_tween_data.connection then
+                            pcall(function() active_tween_data.connection:Disconnect() end)
+                            active_tween_data.connection = nil
+                        end
+                        active_tween_data.target_position = nil
+
+                        local message = string.format(
+                            "In combat + player %s within %.0f studs - COMBAT LOG",
+                            other_player and other_player.Name or "Unknown",
+                            dist or -1
+                        )
+
+                        -- Queue visibility/logging without delaying the combat log itself.
+                        task.spawn(function()
+                            pcall(function() library:Notify(message) end)
+                            pcall(function() utility:plain_webhook(string.format("@here %s", message)) end)
+                        end)
+
+                        -- Use the cloned original Kick function captured at script startup.
+                        -- Also queue a method-call fallback; if the cloned kick really disconnects us,
+                        -- this deferred fallback never matters, but if it is swallowed it gets one more shot.
+                        pcall(function()
+                            Kick(plr, message)
+                        end)
+                        task.delay(0.15, function()
+                            pcall(function()
+                                if plr and plr.Parent then
+                                    plr:Kick(message)
+                                end
+                            end)
+                        end)
+                    end
+
+                    track_connection("combat_proximity_kick", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
+                        if combat_log_triggered then return end
+                        if shared.is_unloading then return end
+                        if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then return end
+
+                        local character = plr.Character
+                        if not character or not is_character_in_combat(character) then return end
+
+                        local bot_hrp = FindFirstChild(character, "HumanoidRootPart")
+                        if not bot_hrp then return end
+
+                        for _, other_player in next, plrs:GetPlayers() do
+                            if other_player ~= plr then
+                                local other_character = other_player.Character
+                                local other_hrp = other_character and FindFirstChild(other_character, "HumanoidRootPart")
+                                local other_humanoid = other_character and FindFirstChildOfClass(other_character, "Humanoid")
+
+                                if other_hrp and (not other_humanoid or other_humanoid.Health > 0) then
+                                    local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
+                                    if dist <= COMBAT_LOG_RANGE then
+                                        trigger_combat_log(other_player, dist)
+                                        return
+                                    end
+                                end
+                            end
+                        end
+                    end)))
+                end
 
                 -- Continuous bot-session MENU watchdog only.
                 -- If StartMenu remains present for >10s, retry one RANDOM serverhop.
