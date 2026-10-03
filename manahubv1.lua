@@ -2478,11 +2478,11 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             function utility:charge_mana_until(amount)
                 local character = plr.Character
                 if not character or FindFirstChildWhichIsA(character, 'ForceField') or not can_use_mana() then
-                    return false
+                    return warn('mana unavailable', can_use_mana())
                 end
 
                 local mana = FindFirstChild(character, 'Mana')
-                if not mana then return false end
+                if not mana then return end
 
                 if FindFirstChild(character, 'Charge') then
                     utility:decharge_mana()
@@ -2506,8 +2506,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         adjusted_wait(0.3, 1.0)
                     end
                 end
-
-                return true
             end
         end
 
@@ -2815,12 +2813,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             local function attemptTeleport(jobId, maxRetries)
                 maxRetries = maxRetries or 3
                 local retries = 0
-
-                -- Record the destination before firing the teleport. On a successful teleport
-                -- this script may be destroyed before it gets a chance to update history.
-                if utility and utility.add_server_to_history then
-                    utility:add_server_to_history(jobId)
-                end
 
                 while retries < maxRetries do
                     teleport_failed = false
@@ -3157,20 +3149,9 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                             warn("[SERVERHOP FALLBACK] No non-full servers available at all")
                         end
 
-                        utility:plain_webhook("@here SERVERHOP FAILED: All servers full or unavailable after 24 attempts.")
-                        warn("[SERVERHOP] All attempts failed")
+                        utility:plain_webhook("@here SERVERHOP FAILED: All servers full or unavailable after 24 attempts. Retrying...")
+                        warn("[SERVERHOP] All attempts failed - retrying immediately...")
                         task.wait(1)
-
-                        -- IMPORTANT: while Trinket Bot is active, do NOT recurse forever here.
-                        -- Recursive Serverhop() calls keep trinket_bot.hop_in_progress=true forever,
-                        -- which used to disable the menu watchdog and leave the bot stuck in StartMenu.
-                        -- Return control to TrinketBotServerhop/the session watchdog so it can recover.
-                        if bot_started then
-                            warn("[SERVERHOP] Bot session active - returning control to session watchdog")
-                            return false
-                        end
-
-                        -- Preserve the old continuous retry behavior for non-bot/manual serverhops.
                         return utility:Serverhop(prefer_empty)
                     else
                         warn("[!] No servers found in ServerInfo, using fallback")
@@ -12187,35 +12168,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 expected_teleport_until = 0,
                 hop_in_progress = false,
                 stuck_since = 0,
-                gate_in_progress = false,
-
-                -- Path/Gate reliability state
-                last_successful_gate = nil,
-                current_point_index = 0,
-                current_point_started_at = 0,
-                last_path_progress_at = 0,
-                last_path_position = nil,
-                path_watchdog_busy = false,
-
-                -- Highest-priority safety latch for emergency selected-item serverhops.
-                priority_emergency_hop = false,
-
-                -- Once Kick on Trinket matches an Artifact/selected item, this latches the
-                -- normal "finish path -> kick" flow. While active, Trinket Bot watchdogs
-                -- and serverhop paths are not allowed to interrupt that flow.
-                artifact_kick_flow_active = false,
-
-                -- Saved-path settings snapshot. When a path is loaded, settings stored inside
-                -- that path are authoritative for path-specific behavior (especially Kick on Trinket).
-                active_path_settings = nil,
-                active_path_settings_name = "",
-
-                -- Random-access path editor state
-                edit_mode_enabled = false,
-                selected_edit_point_index = nil,
-                point_spheres = {},
-                point_edit_handles = nil,
-                point_edit_selection = nil
+                gate_in_progress = false
             }
 
             cheat_client.trinket_bot = trinket_bot
@@ -12249,43 +12202,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             local kick_debounce = false
             local kick_after_path = false
             local kick_trinket_name = ""
-
-            local function normalize_kick_trinket_name(value)
-                return tostring(value or ""):gsub("%s+", ""):lower()
-            end
-
-            local function get_active_path_kick_settings()
-                -- Once a Saved Path is loaded, NEVER let stale MemStorage/global UI state
-                -- silently override that path's own Kick-on-Trinket configuration.
-                local path_settings = trinket_bot.active_path_settings
-                if type(path_settings) == "table" and trinket_bot.active_path_settings_name ~= "" then
-                    local enabled = path_settings.kick_on_trinket == true
-                    local selected = type(path_settings.kick_trinket_list) == "table" and path_settings.kick_trinket_list or {}
-                    return enabled, selected, "path:" .. trinket_bot.active_path_settings_name
-                end
-
-                -- Do not evaluate backpack ChildAdded events until ExecutePath/load_path_by_name
-                -- has armed an authoritative settings snapshot. This prevents inventory restoration
-                -- on a fresh server from triggering Kick-on-Trinket using stale/default UI values.
-                return false, {}, "path-settings-not-ready"
-            end
-
-            local function kick_selection_contains(selected, item_name)
-                if type(selected) ~= "table" then return false end
-                local wanted = normalize_kick_trinket_name(item_name)
-                for key, value in pairs(selected) do
-                    local configured_name = nil
-                    if type(key) == "string" and value then
-                        configured_name = key
-                    elseif type(value) == "string" then
-                        configured_name = value
-                    end
-                    if configured_name and normalize_kick_trinket_name(configured_name) == wanted then
-                        return true, configured_name
-                    end
-                end
-                return false
-            end
 
             local proximity_warnings = {}
             local mana_initialized = false
@@ -12366,262 +12282,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 end
             end
 
-            -- Random-access path point editor. Any loaded/created point can be selected and
-            -- adjusted directly; users no longer need to Undo every later point first.
-            local point_editor_connections = {}
-            local point_editor_status_label = nil
-            local handle_drag_origin = nil
-            local handle_drag_active = false
-            local free_drag = {
-                active = false,
-                point_index = nil,
-                plane_origin = nil,
-                plane_normal = nil,
-                offset = Vector3.new(0, 0, 0),
-                moved = false
-            }
-
-            local function disconnect_point_editor_connections()
-                for _, connection in ipairs(point_editor_connections) do
-                    if connection then
-                        pcall(function() connection:Disconnect() end)
-                    end
-                end
-                point_editor_connections = {}
-            end
-
-            local function destroy_point_editor_adornments()
-                disconnect_point_editor_connections()
-
-                if trinket_bot.point_edit_handles then
-                    pcall(function() trinket_bot.point_edit_handles:Destroy() end)
-                    trinket_bot.point_edit_handles = nil
-                end
-
-                if trinket_bot.point_edit_selection then
-                    pcall(function() trinket_bot.point_edit_selection:Destroy() end)
-                    trinket_bot.point_edit_selection = nil
-                end
-
-                handle_drag_origin = nil
-                handle_drag_active = false
-            end
-
-            local function set_point_editor_status(text)
-                if point_editor_status_label and point_editor_status_label.SetText then
-                    point_editor_status_label:SetText(text)
-                end
-            end
-
-            local function face_to_axis(face)
-                if face == Enum.NormalId.Right then
-                    return Vector3.new(1, 0, 0)
-                elseif face == Enum.NormalId.Left then
-                    return Vector3.new(-1, 0, 0)
-                elseif face == Enum.NormalId.Top then
-                    return Vector3.new(0, 1, 0)
-                elseif face == Enum.NormalId.Bottom then
-                    return Vector3.new(0, -1, 0)
-                elseif face == Enum.NormalId.Front then
-                    return Vector3.new(0, 0, -1)
-                elseif face == Enum.NormalId.Back then
-                    return Vector3.new(0, 0, 1)
-                end
-                return Vector3.new(0, 0, 0)
-            end
-
-            local function refresh_point_editor_adornments()
-                destroy_point_editor_adornments()
-
-                if not trinket_bot.edit_mode_enabled then
-                    set_point_editor_status("Point Editor: OFF")
-                    return
-                end
-
-                local point_index = tonumber(trinket_bot.selected_edit_point_index)
-                local point = point_index and trinket_bot.path_points[point_index] or nil
-                local sphere = point_index and trinket_bot.point_spheres[point_index] or nil
-
-                if not point or not sphere or not sphere.Parent then
-                    trinket_bot.selected_edit_point_index = nil
-                    set_point_editor_status("Point Editor: click any path point")
-                    return
-                end
-
-                local selection = Instance.new("SelectionBox")
-                selection.Name = "TrinketPathPointSelection"
-                selection.Adornee = sphere
-                selection.LineThickness = 0.06
-                selection.SurfaceTransparency = 0.82
-                selection.Color3 = Color3.fromRGB(255, 215, 0)
-                selection.Parent = sphere
-                trinket_bot.point_edit_selection = selection
-
-                local handles = Instance.new("Handles")
-                handles.Name = "TrinketPathPointHandles"
-                handles.Adornee = sphere
-                handles.Style = Enum.HandlesStyle.Movement
-                handles.Faces = Faces.new(
-                    Enum.NormalId.Right,
-                    Enum.NormalId.Left,
-                    Enum.NormalId.Top,
-                    Enum.NormalId.Bottom,
-                    Enum.NormalId.Front,
-                    Enum.NormalId.Back
-                )
-                handles.Color3 = Color3.fromRGB(255, 215, 0)
-                handles.Parent = hidden_folder
-                trinket_bot.point_edit_handles = handles
-
-                table.insert(point_editor_connections, handles.MouseButton1Down:Connect(function(face)
-                    local idx = tonumber(trinket_bot.selected_edit_point_index)
-                    local selected_point = idx and trinket_bot.path_points[idx] or nil
-                    if selected_point then
-                        handle_drag_active = true
-                        free_drag.active = false
-                        handle_drag_origin = selected_point.position
-                    end
-                end))
-
-                table.insert(point_editor_connections, handles.MouseDrag:Connect(function(face, distance)
-                    if not trinket_bot.edit_mode_enabled or not handle_drag_origin then return end
-
-                    local idx = tonumber(trinket_bot.selected_edit_point_index)
-                    local selected_point = idx and trinket_bot.path_points[idx] or nil
-                    local selected_sphere = idx and trinket_bot.point_spheres[idx] or nil
-                    if not selected_point or not selected_sphere or not selected_sphere.Parent then return end
-
-                    local axis = face_to_axis(face)
-                    local new_position = handle_drag_origin + (axis * distance)
-                    selected_point.position = new_position
-                    selected_sphere.Position = new_position
-                end))
-
-                table.insert(point_editor_connections, handles.MouseButton1Up:Connect(function()
-                    handle_drag_origin = nil
-                    handle_drag_active = false
-                    local idx = tonumber(trinket_bot.selected_edit_point_index)
-                    if idx then
-                        set_point_editor_status(string.format("Editing Point #%d - drag sphere or X/Y/Z handles", idx))
-                    end
-                end))
-
-                set_point_editor_status(string.format("Editing Point #%d - drag sphere or X/Y/Z handles", point_index))
-            end
-
-            local function select_path_point(point_index, notify_user)
-                point_index = tonumber(point_index)
-                if not point_index or point_index < 1 or point_index > #trinket_bot.path_points then
-                    library:Notify("Invalid point number!")
-                    return false
-                end
-
-                trinket_bot.selected_edit_point_index = point_index
-                if Options and Options.EditPathPointIndex then
-                    pcall(function() Options.EditPathPointIndex:SetValue(tostring(point_index)) end)
-                end
-                refresh_point_editor_adornments()
-
-                if notify_user then
-                    library:Notify(string.format("Selected path point #%d", point_index))
-                end
-                return true
-            end
-
-            local function ray_to_editor_plane(plane_origin, plane_normal)
-                local camera = ws.CurrentCamera
-                if not camera then return nil end
-
-                local ray = camera:ViewportPointToRay(mouse.X, mouse.Y)
-                local denominator = ray.Direction:Dot(plane_normal)
-                if math.abs(denominator) < 0.0001 then
-                    return nil
-                end
-
-                local distance = (plane_origin - ray.Origin):Dot(plane_normal) / denominator
-                if distance <= 0 then
-                    return nil
-                end
-
-                return ray.Origin + (ray.Direction * distance)
-            end
-
-            utility:Connection(uis.InputBegan, function(input, game_processed)
-                if game_processed or not trinket_bot.edit_mode_enabled then return end
-                if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
-                if handle_drag_active then return end
-
-                local target = mouse.Target
-                if not target then return end
-
-                local point_index = target:GetAttribute("TrinketPathPointIndex")
-                if not point_index then return end
-
-                point_index = tonumber(point_index)
-                if not select_path_point(point_index, false) then return end
-
-                local camera = ws.CurrentCamera
-                local point = trinket_bot.path_points[point_index]
-                if not camera or not point then return end
-
-                local plane_normal = camera.CFrame.LookVector
-                local plane_origin = point.position
-                local hit_position = ray_to_editor_plane(plane_origin, plane_normal)
-
-                free_drag.active = true
-                free_drag.point_index = point_index
-                free_drag.plane_origin = plane_origin
-                free_drag.plane_normal = plane_normal
-                free_drag.offset = hit_position and (point.position - hit_position) or Vector3.new(0, 0, 0)
-                free_drag.moved = false
-            end)
-
-            utility:Connection(uis.InputEnded, function(input)
-                if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
-                if not free_drag.active then return end
-
-                local edited_index = free_drag.point_index
-                local did_move = free_drag.moved
-
-                free_drag.active = false
-                free_drag.point_index = nil
-                free_drag.plane_origin = nil
-                free_drag.plane_normal = nil
-                free_drag.offset = Vector3.new(0, 0, 0)
-                free_drag.moved = false
-
-                if edited_index then
-                    set_point_editor_status(string.format("Editing Point #%d - drag sphere or X/Y/Z handles", edited_index))
-                    if did_move then
-                        library:Notify(string.format("Adjusted point #%d", edited_index))
-                    end
-                end
-            end)
-
-            utility:Connection(rs.RenderStepped, function()
-                if not trinket_bot.edit_mode_enabled or not free_drag.active or handle_drag_active then return end
-                if not uis:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then return end
-
-                local idx = tonumber(free_drag.point_index)
-                local point = idx and trinket_bot.path_points[idx] or nil
-                local sphere = idx and trinket_bot.point_spheres[idx] or nil
-                if not point or not sphere or not sphere.Parent then
-                    free_drag.active = false
-                    return
-                end
-
-                local hit_position = ray_to_editor_plane(free_drag.plane_origin, free_drag.plane_normal)
-                if not hit_position then return end
-
-                local new_position = hit_position + free_drag.offset
-                if (new_position - point.position).Magnitude > 0.01 then
-                    free_drag.moved = true
-                end
-
-                point.position = new_position
-                sphere.Position = new_position
-            end)
-
             local function create_point_visualization(position, is_wait_point, is_gate_point)
                 local sphere = Instance.new("Part")
                 sphere.Shape = Enum.PartType.Ball
@@ -12629,8 +12289,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 sphere.Position = position
                 sphere.Anchored = true
                 sphere.CanCollide = false
-                sphere.CanTouch = false
-                sphere.CanQuery = true
                 sphere.Material = Enum.Material.Neon
 
                 if is_gate_point then
@@ -12648,15 +12306,12 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             end
 
             local function update_visualizations()
-                destroy_point_editor_adornments()
-
                 for _, part in ipairs(trinket_bot.point_visualizations) do
                     if part and part.Parent then
                         pcall(function() part:Destroy() end)
                     end
                 end
                 trinket_bot.point_visualizations = {}
-                trinket_bot.point_spheres = {}
 
                 if trinket_bot.visualize_enabled then
                     local previous_sphere = nil
@@ -12664,8 +12319,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     for i, point in ipairs(trinket_bot.path_points) do
                         local is_gate = point.is_gate_point or false
                         local sphere = create_point_visualization(point.position, point.wait_for_trinket, is_gate)
-                        sphere:SetAttribute("TrinketPathPointIndex", i)
-                        trinket_bot.point_spheres[i] = sphere
                         table.insert(trinket_bot.point_visualizations, sphere)
 
                         local billboard = Instance.new("BillboardGui")
@@ -12680,7 +12333,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         label.BackgroundTransparency = 1
 
                         if is_gate then
-                            label.Text = string.format("#%d G: %s", i, point.gate_location or "???")
+                            label.Text = "G: " .. (point.gate_location or "???")
                             label.TextColor3 = Color3.fromRGB(255, 105, 180)
                         else
                             label.Text = tostring(i)
@@ -12713,10 +12366,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
 
                         previous_sphere = sphere
                     end
-                end
-
-                if trinket_bot.edit_mode_enabled then
-                    refresh_point_editor_adornments()
                 end
             end
 
@@ -13088,31 +12737,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     return false
                 end
 
-                -- DUPLICATE-GATE GUARD:
-                -- A verified Gate can be requested again by recovery/path logic before the next
-                -- path point has had time to advance. If we are still at the landing position,
-                -- treat the repeated request as already completed instead of casting Gate twice.
-                do
-                    local recent_gate = trinket_bot.last_successful_gate
-                    local current_character = plr.Character
-                    local current_root = current_character and FindFirstChild(current_character, "HumanoidRootPart")
-
-                    if recent_gate
-                        and current_root
-                        and tostring(recent_gate.where) == tostring(where)
-                        and (tick() - (recent_gate.time or 0)) <= 12
-                        and recent_gate.position
-                        and (current_root.Position - recent_gate.position).Magnitude <= 180
-                    then
-                        warn(string.format("[GATE] Duplicate %s request suppressed (already gated %.1fs ago)", tostring(where), tick() - (recent_gate.time or tick())))
-                        pcall(function()
-                            library:Notify(string.format("Already gated to %s - skipping duplicate Gate cast", tostring(where)))
-                        end)
-                        trinket_bot.gate_in_progress = false
-                        return true
-                    end
-                end
-
                 -- HARD GATE LOCK:
                 -- Once the bot starts processing a Gate point, HoldWeaponWhileBotting must
                 -- stay disabled across every failed attempt/retry. It is unlocked ONLY after
@@ -13313,83 +12937,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     end
                 end
 
-                -- KHEI BED / LYING-DOWN RECOVERY:
-                -- Gate can fail if the bot reaches a Gate point while the character is still
-                -- seated / platform-standing / lying sideways on a bed. Detect that state,
-                -- force the humanoid upright, then send ONE real Space press before Gate prep.
-                -- This is intentionally local to Gate() so normal path movement never gets
-                -- random jump inputs.
-                local function ensureStandingBeforeGate()
-                    local current_character = plr.Character
-                    local humanoid = current_character and FindFirstChildOfClass(current_character, "Humanoid")
-                    local root = current_character and FindFirstChild(current_character, "HumanoidRootPart")
-                    if not humanoid or not root then
-                        return false
-                    end
-
-                    local state = humanoid:GetState()
-                    local root_up_y = math.abs(root.CFrame.UpVector.Y)
-                    local looks_laid_down = root_up_y < 0.45
-                    local needs_wakeup = humanoid.Sit
-                        or humanoid.PlatformStand
-                        or state == Enum.HumanoidStateType.Seated
-                        or state == Enum.HumanoidStateType.PlatformStanding
-                        or looks_laid_down
-
-                    if not needs_wakeup then
-                        return true
-                    end
-
-                    library:Notify("Gate: character is sitting/lying down - getting up and jumping first")
-                    warn(string.format(
-                        "[GATE] Wake-up before Gate (state=%s, Sit=%s, PlatformStand=%s, UpY=%.2f)",
-                        tostring(state),
-                        tostring(humanoid.Sit),
-                        tostring(humanoid.PlatformStand),
-                        root_up_y
-                    ))
-
-                    -- Break the bed/seated state first.
-                    humanoid.Sit = false
-                    humanoid.PlatformStand = false
-                    pcall(function()
-                        humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-                    end)
-                    task.wait(0.10)
-
-                    -- One Space press, as requested, to physically pop the character off the bed.
-                    humanoid.Jump = true
-                    if vim then
-                        vim:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-                        task.wait(0.08)
-                        vim:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-                    end
-                    pcall(function()
-                        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-                    end)
-
-                    task.wait(0.35)
-
-                    -- Some beds try to re-seat the humanoid for a frame after the jump.
-                    humanoid.Sit = false
-                    humanoid.PlatformStand = false
-                    if humanoid:GetState() == Enum.HumanoidStateType.Seated
-                        or humanoid:GetState() == Enum.HumanoidStateType.PlatformStanding
-                    then
-                        pcall(function()
-                            humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-                        end)
-                        task.wait(0.10)
-                    end
-
-                    return true
-                end
-
-                if not ensureStandingBeforeGate() then
-                    warn("Could not recover standing state before Gate - retrying")
-                    return false
-                end
-
                 -- GATE PLATFORM / ANTI-CLIFF CHECK:
                 -- Gate can fail when the character is technically standing on ground but too close
                 -- to an edge. Do not assume the safe direction is always "right". Verify a real
@@ -13552,13 +13099,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     mana_initialized = true
                 end
 
-                -- Re-check immediately before input lock / Gate equip. Some Khei beds can
-                -- re-seat the character shortly after the first wake-up attempt.
-                if not ensureStandingBeforeGate() then
-                    warn("Character could not stand immediately before Gate equip - retrying")
-                    return false
-                end
-
                 blockInputs()
                 task.delay(12, function()
                     if INPUT_BLOCKED then
@@ -13699,15 +13239,6 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 ))
 
                 task.wait(0.08)
-
-                local pre_gate_root = character and FindFirstChild(character, "HumanoidRootPart")
-                if not pre_gate_root then
-                    warn("HumanoidRootPart missing before gate cast - keeping Hold Weapon locked for retry")
-                    if INPUT_BLOCKED then unblockInputs() end
-                    return false
-                end
-                local pre_gate_position = pre_gate_root.Position
-
                 utility:RightClick()
                 task.wait(0.8)
 
@@ -13721,100 +13252,41 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     unblockInputs()
                 end
 
-                -- NoFall is useful, but it can arrive late or be absent. Verify the Gate by
-                -- either NoFall OR a real position jump, then validate the expected destination.
-                local verify_deadline = tick() + 6
-                while tick() < verify_deadline
-                    and trinket_bot.path_running
-                    and not emergency_gate_requested
-                    and not trinket_bot.moderator_detected
-                do
-                    local current_character = plr.Character
-                    local current_root = current_character and FindFirstChild(current_character, "HumanoidRootPart")
+                local post_gate_wait_start = tick()
+                while tick() - post_gate_wait_start < 2.5 and trinket_bot.path_running and not emergency_gate_requested and not trinket_bot.moderator_detected do
+                    if FindFirstChild(character, "NoFall") then
+                        task.wait(1.5)
 
-                    if current_root then
-                        local post_gate_position = current_root.Position
-                        local moved_distance = (post_gate_position - pre_gate_position).Magnitude
-                        local has_nofall = FindFirstChild(current_character, "NoFall") ~= nil
-
-                        if has_nofall or moved_distance >= 150 then
-                            -- Gate replication can report NoFall / the first large position jump before
-                            -- the final landing position has settled. Sample for a short window and keep
-                            -- the position closest to the recorded next path point. This prevents a real
-                            -- successful Gate from being misread as a failure and immediately cast again.
-                            local settled_position = post_gate_position
-                            local best_destination_distance = expected_destination
-                                and (settled_position - expected_destination).Magnitude
-                                or nil
-                            local settle_deadline = tick() + 1.5
-
-                            while tick() < settle_deadline
-                                and trinket_bot.path_running
-                                and not emergency_gate_requested
-                                and not trinket_bot.moderator_detected
-                            do
-                                task.wait(0.1)
-
-                                current_character = plr.Character
-                                current_root = current_character and FindFirstChild(current_character, "HumanoidRootPart")
-                                if not current_root then
-                                    warn("Character lost during gate verification - keeping Hold Weapon locked for retry")
-                                    return false
-                                end
-
-                                local candidate_position = current_root.Position
-                                if expected_destination then
-                                    local candidate_distance = (candidate_position - expected_destination).Magnitude
-                                    if not best_destination_distance or candidate_distance < best_destination_distance then
-                                        best_destination_distance = candidate_distance
-                                        settled_position = candidate_position
-                                    end
-
-                                    -- Once we are comfortably inside the destination area there is no
-                                    -- reason to keep waiting for more replication samples.
-                                    if candidate_distance <= 350 then
-                                        break
-                                    end
-                                else
-                                    settled_position = candidate_position
-                                end
-                            end
-
-                            post_gate_position = settled_position
+                        if character and FindFirstChild(character, "HumanoidRootPart") then
+                            local post_gate_position = character.HumanoidRootPart.Position
 
                             if expected_destination then
-                                local distance_to_destination = best_destination_distance
-                                    or (post_gate_position - expected_destination).Magnitude
+                                local distance_to_destination = (post_gate_position - expected_destination).Magnitude
 
-                                -- SmoothTeleport itself refuses path jumps above 1500 studs. Therefore a
-                                -- Gate landing within 1500 studs of the next recorded path point is a
-                                -- usable/valid landing and must not be retried just because it is >700.
-                                local GATE_DESTINATION_TOLERANCE = 1500
-                                if distance_to_destination > GATE_DESTINATION_TOLERANCE then
+                                if distance_to_destination > 700 then
                                     library:Notify(string.format("BACKFIRE detected (%.0f studs from expected destination) - Hold Weapon remains locked; retrying Gate", distance_to_destination))
                                     return false
                                 end
 
                                 library:Notify(string.format("Successfully gated to %s (%.0f studs from destination) - Hold Weapon unlocked", where, distance_to_destination))
-                            else
-                                library:Notify(string.format("Successfully gated to %s - Hold Weapon unlocked", where))
+
+                                unlockHeldWeaponAfterGateSuccess()
+                                return true
                             end
 
-                            trinket_bot.last_successful_gate = {
-                                where = tostring(where),
-                                time = tick(),
-                                position = post_gate_position
-                            }
+                            library:Notify(string.format("Successfully gated to %s - Hold Weapon unlocked", where))
 
                             unlockHeldWeaponAfterGateSuccess()
                             return true
+                        else
+                            warn("Character lost during gate verification - keeping Hold Weapon locked for retry")
+                            return false
                         end
                     end
-
                     task.wait(0.1)
                 end
 
-                warn("Gate teleportation could not be verified after 6s (no NoFall/position jump) - keeping Hold Weapon locked for retry")
+                warn("Gate teleportation failed: NoFall not found after 2.5s - keeping Hold Weapon locked for retry")
                 return false
             end
 
@@ -14073,253 +13545,10 @@ end
 
             local teleport_debounce = false
 
-            -- BOT SESSION SERVERHOP RECOVERY
-            -- Never trust hop_in_progress by itself: if a Serverhop coroutine stalls, that flag can
-            -- stay true forever. During an active Trinket Bot session we instead watch the actual
-            -- StartMenu + JobId and force an independent join attempt when no transition happens.
-            local MENU_SERVERHOP_TIMEOUT = 10
-            local MENU_DIRECT_RETRY_INTERVAL = 10
-            local MENU_TELEPORT_FALLBACK_AFTER = math.huge -- no timed escalation; retry random server every 10s
+            -- If Trinket Bot gets stuck in StartMenu for 30s after a hop, retry automatically.
+            local MENU_SERVERHOP_TIMEOUT = 30
             local menu_serverhop_watchdog_token = 0
-            local menu_recovery_busy = false
-            local menu_recovery_last_attempt = 0
-            local menu_recovery_attempt_count = 0
-            local menu_recovery_attempted_servers = {}
-            local menu_recovery_job_id = game.JobId
-            local menu_force_loop_running = false
-            local menu_force_loop_job_id = nil
 
-            local function ResetMenuServerhopRecovery()
-                menu_recovery_busy = false
-                menu_recovery_last_attempt = 0
-                menu_recovery_attempt_count = 0
-                menu_recovery_attempted_servers = {}
-                menu_recovery_job_id = game.JobId
-            end
-
-            local function IsTrinketBotSessionActive()
-                return mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true"
-            end
-
-            local function CanSessionWatchdogHop()
-                if not IsTrinketBotSessionActive() then return false end
-                if shared and shared.is_unloading then return false end
-                if trinket_bot.test_mode then return false end
-                if trinket_bot.artifact_kick_flow_active then return false end
-                if Toggles.StayInServer and Toggles.StayInServer.Value then return false end
-                return true
-            end
-
-            local function PickWatchdogServer(prefer_empty)
-                local server_info = FindFirstChild(rps, "ServerInfo")
-                if not server_info then return nil end
-
-                local http_service = Services.HttpService
-                local candidates = {}
-
-                local function collect(skip_attempted)
-                    candidates = {}
-                    for _, server in ipairs(server_info:GetChildren()) do
-                        local job_id = server.Name
-                        if job_id ~= game.JobId and (not skip_attempted or not menu_recovery_attempted_servers[job_id]) then
-                            local players_value = FindFirstChild(server, "Players")
-                            local player_count = 0
-                            local is_available = true
-
-                            if players_value and players_value:IsA("StringValue") then
-                                local ok, decoded = pcall(function()
-                                    return http_service:JSONDecode(players_value.Value)
-                                end)
-                                if ok and type(decoded) == "table" then
-                                    player_count = #decoded
-                                    is_available = player_count < 23
-                                end
-                            end
-
-                            if is_available then
-                                table.insert(candidates, {job_id = job_id, players = player_count})
-                            end
-                        end
-                    end
-                end
-
-                collect(true)
-                if #candidates == 0 then
-                    -- We exhausted the local list. Clear only the watchdog-local attempts and try again.
-                    menu_recovery_attempted_servers = {}
-                    collect(false)
-                end
-
-                if #candidates == 0 then return nil end
-
-                if prefer_empty then
-                    table.sort(candidates, function(a, b)
-                        return a.players < b.players
-                    end)
-                    return candidates[1].job_id
-                end
-
-                return candidates[math.random(1, #candidates)].job_id
-            end
-
-            local function ForceSessionMenuServerhop(prefer_empty, source, menu_age, priority_mode)
-                if not CanSessionWatchdogHop() then return false end
-                if menu_recovery_busy then return false end
-
-                local now = tick()
-                if now - menu_recovery_last_attempt < MENU_DIRECT_RETRY_INTERVAL then
-                    return false
-                end
-
-                if menu_recovery_job_id ~= game.JobId then
-                    ResetMenuServerhopRecovery()
-                end
-
-                menu_recovery_busy = true
-                menu_recovery_last_attempt = now
-                menu_recovery_attempt_count = menu_recovery_attempt_count + 1
-
-                local starting_job_id = game.JobId
-                local attempt_number = menu_recovery_attempt_count
-                local age = tonumber(menu_age) or 0
-
-                if trinket_bot.hop_in_progress and age >= MENU_SERVERHOP_TIMEOUT then
-                    warn(string.format("[SESSION WATCHDOG] Clearing stale hop_in_progress after %.1fs in StartMenu", age))
-                    trinket_bot.hop_in_progress = false
-                end
-                trinket_bot.path_running = false
-
-                -- Normal watchdog diagnostics can happen before recovery. Priority emergency mode
-                -- deliberately delays UI/webhook work until AFTER the join/teleport request is sent.
-                if not priority_mode then
-                    pcall(function()
-                        library:Notify(string.format("SESSION WATCHDOG: menu stuck %.0fs - recovery #%d", age, attempt_number))
-                    end)
-                    pcall(function()
-                        utility:plain_webhook(string.format("@here SESSION WATCHDOG: %s; StartMenu stuck %.0fs; recovery #%d", tostring(source or "unknown"), age, attempt_number))
-                    end)
-                end
-
-                task.spawn(function()
-                    pcall(function()
-                        local requests = FindFirstChild(rps, "Requests")
-                        local return_menu = requests and FindFirstChild(requests, "ReturnToMenu")
-                        if return_menu then return_menu:InvokeServer() end
-                    end)
-                    task.wait(0.15)
-
-                    local requests = FindFirstChild(rps, "Requests")
-                    local direct_join = join_server or (requests and FindFirstChild(requests, "JoinPublicServer"))
-                    -- Menu watchdog is intentionally simple: random server attempt every 10s.
-                    local target_job_id = PickWatchdogServer(false)
-
-                    if direct_join and target_job_id then
-                        menu_recovery_attempted_servers[target_job_id] = true
-                        pcall(function()
-                            if utility and utility.add_server_to_history then
-                                utility:add_server_to_history(target_job_id)
-                            end
-                        end)
-                        warn(string.format("[SESSION WATCHDOG] Random JoinPublicServer -> %s (attempt %d)", target_job_id, attempt_number))
-                        pcall(function()
-                            direct_join:FireServer(target_job_id)
-                        end)
-                    else
-                        -- Only a last-resort API fallback when ServerInfo/direct join is unavailable.
-                        warn(string.format("[SESSION WATCHDOG] No random ServerInfo target; TeleportService fallback (attempt %d)", attempt_number))
-                        pcall(function()
-                            tps:Teleport(game.PlaceId, plr)
-                        end)
-                    end
-
-                    if priority_mode then
-                        task.defer(function()
-                            pcall(function()
-                                library:Notify(string.format("PRIORITY SERVERHOP: %s", tostring(source or "dangerous item detected")))
-                            end)
-                            pcall(function()
-                                utility:plain_webhook(string.format("@here PRIORITY SERVERHOP: %s", tostring(source or "dangerous item detected")))
-                            end)
-                        end)
-                    end
-
-                    task.wait(2)
-                    if game.JobId == starting_job_id then
-                        menu_recovery_busy = false
-                    end
-                end)
-
-                return true
-            end
-
-            -- Once StartMenu has been idle for 10s, retry a RANDOM serverhop every 10s
-            -- until this client changes JobId. If Play succeeds and looting resumes, stop retrying.
-            local function StartSessionHopLoop(prefer_empty, source, initial_menu_age, priority_mode)
-                local starting_job_id = game.JobId
-                if menu_force_loop_running and menu_force_loop_job_id == starting_job_id then
-                    return
-                end
-
-                menu_force_loop_running = true
-                menu_force_loop_job_id = starting_job_id
-
-                task.spawn(function()
-                    local loop_started = tick() - math.max(tonumber(initial_menu_age) or 0, MENU_SERVERHOP_TIMEOUT)
-                    local attempt = 0
-
-                    while shared and not shared.is_unloading
-                        and IsTrinketBotSessionActive()
-                        and game.JobId == starting_job_id do
-
-                        if not CanSessionWatchdogHop() then break end
-
-                        local player_gui = plr:FindFirstChild("PlayerGui")
-                        local start_menu = player_gui and FindFirstChild(player_gui, "StartMenu")
-
-                        -- If Play succeeded and looting resumed, this is no longer a stuck-menu case.
-                        if not start_menu and trinket_bot.path_running and not trinket_bot.priority_emergency_hop then
-                            warn("[SESSION WATCHDOG] Play succeeded and loot path resumed - ending forced hop loop")
-                            break
-                        end
-
-                        attempt = attempt + 1
-                        local stuck_age = math.max(MENU_SERVERHOP_TIMEOUT, tick() - loop_started)
-                        trinket_bot.hop_in_progress = false
-                        ForceSessionMenuServerhop(
-                            prefer_empty,
-                            source or "10s StartMenu random retry loop",
-                            stuck_age,
-                            priority_mode == true
-                        )
-
-                        local wait_until = tick() + MENU_DIRECT_RETRY_INTERVAL
-                        while tick() < wait_until and game.JobId == starting_job_id do
-                            if not IsTrinketBotSessionActive() then break end
-                            local gui_now = plr:FindFirstChild("PlayerGui")
-                            local menu_now = gui_now and FindFirstChild(gui_now, "StartMenu")
-                            if not menu_now and trinket_bot.path_running and not trinket_bot.priority_emergency_hop then
-                                break
-                            end
-                            task.wait(0.25)
-                        end
-
-                        if game.JobId ~= starting_job_id then break end
-                        local gui_now = plr:FindFirstChild("PlayerGui")
-                        local menu_now = gui_now and FindFirstChild(gui_now, "StartMenu")
-                        if not menu_now and trinket_bot.path_running and not trinket_bot.priority_emergency_hop then
-                            break
-                        end
-                    end
-
-                    if menu_force_loop_job_id == starting_job_id then
-                        menu_force_loop_running = false
-                        menu_force_loop_job_id = nil
-                    end
-                end)
-            end
-
-            -- Per-hop watchdog. Unlike the old version, this intentionally does NOT stop just because
-            -- hop_in_progress=true; that exact stale flag was the cause of permanent menu hangs.
             local function StartMenuServerhopWatchdog(prefer_empty)
                 menu_serverhop_watchdog_token = menu_serverhop_watchdog_token + 1
                 local my_token = menu_serverhop_watchdog_token
@@ -14332,20 +13561,32 @@ end
                         and my_token == menu_serverhop_watchdog_token
                         and game.JobId == starting_job_id do
 
-                        if not IsTrinketBotSessionActive() then
-                            break
-                        end
-
                         local player_gui = plr:FindFirstChild("PlayerGui")
                         local start_menu = player_gui and FindFirstChild(player_gui, "StartMenu")
 
                         if start_menu then
-                            menu_since = menu_since or tick()
-                            local menu_age = tick() - menu_since
-                            if menu_age >= MENU_SERVERHOP_TIMEOUT then
-                                StartSessionHopLoop(false, "per-hop watchdog", menu_age, false)
+                            if not menu_since then
+                                menu_since = tick()
+                            elseif tick() - menu_since >= MENU_SERVERHOP_TIMEOUT then
+                                -- Do not overlap the main TrinketBotServerhop attempt.
+                                if not trinket_bot.hop_in_progress then
+                                    library:Notify("Stuck in menu for 30s - retrying serverhop...")
+                                    warn("[SERVERHOP WATCHDOG] StartMenu active for 30s - retrying serverhop")
+
+                                    -- Reset before retry so another retry can happen after another 30s if needed.
+                                    menu_since = tick()
+
+                                    local ok, result = pcall(function()
+                                        return utility:Serverhop(prefer_empty)
+                                    end)
+
+                                    if not ok then
+                                        warn("[SERVERHOP WATCHDOG] Retry errored: " .. tostring(result))
+                                    end
+                                end
                             end
                         else
+                            -- Only count time actually spent in StartMenu.
                             menu_since = nil
                         end
 
@@ -14404,7 +13645,6 @@ end
                     disable_gpu_rendering = Toggles.DisableGPURendering and Toggles.DisableGPURendering.Value or false,
                     emergency_serverhop_conditions = Options.EmergencyServerhopConditions and Options.EmergencyServerhopConditions.Value or {},
                     dangerous_spells_in_range = Options.DangerousSpellsInRange and Options.DangerousSpellsInRange.Value or {},
-                    dangerous_equipped_spells_v1 = true,
                     join_oldest_server = Toggles.JoinOldestServer and Toggles.JoinOldestServer.Value or false,
                     auto_pop_pds = Toggles.AutoPopPDs and Toggles.AutoPopPDs.Value or false,
                     auto_drop_items = Options.AutoDropItems and Options.AutoDropItems.Value or {},
@@ -14713,11 +13953,6 @@ end
             end
 
             local function TrinketBotServerhop(reason, skip_test_mode_check, prefer_empty)
-                if trinket_bot.artifact_kick_flow_active then
-                    warn(string.format("[KICK ON TRINKET] Serverhop suppressed while artifact kick flow is active: %s", tostring(reason or "Unknown")))
-                    return false
-                end
-
                 trinket_bot.hop_in_progress = true
                 local ok, err = pcall(function()
                     TrinketBotServerhop_Impl(reason, skip_test_mode_check, prefer_empty)
@@ -14959,12 +14194,6 @@ end
                 test_mode = test_mode or false
                 trinket_bot.test_mode = test_mode
 
-                if trinket_bot.priority_emergency_hop then
-                    trinket_bot.path_running = false
-                    warn("[PRIORITY HOP] ExecutePath blocked until server transition completes")
-                    return
-                end
-
                 droppedTools = {}
                 currently_dropping = false
 
@@ -15023,31 +14252,10 @@ end
                     return
                 end
 
-                -- Unsaved/manual paths do not have a JSON settings snapshot. Arm one now from
-                -- the live controls so backpack monitoring cannot fire before the path actually starts.
-                if type(trinket_bot.active_path_settings) ~= "table" then
-                    trinket_bot.active_path_settings = {
-                        kick_on_trinket = Toggles.KickOnTrinket and Toggles.KickOnTrinket.Value or false,
-                        kick_trinket_list = Options.KickTrinketList and Options.KickTrinketList.Value or {}
-                    }
-                    trinket_bot.active_path_settings_name = trinket_bot.current_path_name ~= ""
-                        and trinket_bot.current_path_name or "__manual_session__"
-                end
-
                 trinket_bot.path_running = true
                 trinket_bot.moderator_detected = false
-                if not kick_after_path then
-                    trinket_bot.artifact_kick_flow_active = false
-                end
                 -- Fresh path run: Hold Weapon is allowed until we actually enter a Gate point.
                 trinket_bot.gate_in_progress = false
-
-                -- Reset path-progress watchdog state for this run.
-                trinket_bot.current_point_index = 0
-                trinket_bot.current_point_started_at = tick()
-                trinket_bot.last_path_progress_at = tick()
-                trinket_bot.last_path_position = nil
-                trinket_bot.path_watchdog_busy = false
 
                 if not plr.Character or not FindFirstChild(plr.Character, "HumanoidRootPart") then
                     trinket_bot.path_running = false
@@ -15056,7 +14264,6 @@ end
                 end
 
                 local root = plr.Character.HumanoidRootPart
-                trinket_bot.last_path_position = root.Position
                 local first_point = trinket_bot.path_points[1] and trinket_bot.path_points[1].position
 
                 if not first_point or typeof(first_point) ~= "Vector3" then
@@ -15412,85 +14619,28 @@ end
 
                 local emergency_serverhop_connection
                 local emergency_conditions = Options.EmergencyServerhopConditions and Options.EmergencyServerhopConditions.Value or {}
-                local emergency_priority_hop_sent = false
-
-                local function PriorityEmergencyServerhop(item_name, owner_player, source)
-                    if trinket_bot.artifact_kick_flow_active then return end
-                    if emergency_priority_hop_sent or trinket_bot.priority_emergency_hop then return end
-                    if not IsTrinketBotSessionActive() then return end
-                    if Toggles.StayInServer and Toggles.StayInServer.Value then return end
-
-                    emergency_priority_hop_sent = true
-                    trinket_bot.priority_emergency_hop = true
-
-                    -- Stop every normal action synchronously BEFORE doing diagnostics.
-                    trinket_bot.path_running = false
-                    trinket_bot.path_watchdog_busy = false
-                    trinket_bot.gate_in_progress = false
-                    emergency_gate_requested = nil
-                    currently_dropping = false
-
-                    if active_tween_data.tween then
-                        pcall(function() active_tween_data.tween:Cancel() end)
-                        active_tween_data.tween = nil
-                    end
-                    if active_tween_data.connection then
-                        pcall(function() active_tween_data.connection:Disconnect() end)
-                        active_tween_data.connection = nil
-                    end
-                    active_tween_data.target_position = nil
-
-                    pcall(function()
-                        local char = plr.Character
-                        local hum = char and FindFirstChildOfClass(char, "Humanoid")
-                        if hum then hum:UnequipTools() end
-                    end)
-
-                    local owner_name = owner_player and owner_player.Name or "Unknown"
-                    local owner_id = owner_player and owner_player.UserId or "unknown"
-                    local reason = string.format(
-                        "%s detected on %s (%s)",
-                        tostring(item_name), tostring(owner_name), tostring(owner_id)
-                    )
-
-                    -- Preserve enough state to resume after the new server loads.
-                    if trinket_bot.current_path_name and trinket_bot.current_path_name ~= "" then
-                        pcall(function() mem:SetItem("trinket_bot_path", trinket_bot.current_path_name) end)
-                    end
-                    if plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") then
-                        local pos = plr.Character.HumanoidRootPart.Position
-                        pcall(function()
-                            mem:SetItem("lastPlayerPosition", string.format("%s,%s,%s", pos.X, pos.Y, pos.Z))
-                        end)
-                    end
-
-                    -- HOP FIRST: this loop sends ReturnToMenu/JoinPublicServer immediately and keeps
-                    -- retrying until JobId changes. Its priority_mode delays Notify/webhook until
-                    -- after the first join/teleport request has already been sent.
-                    StartSessionHopLoop(true, "Emergency item " .. reason, MENU_SERVERHOP_TIMEOUT, true)
-                end
 
                 if next(emergency_conditions) ~= nil then
-                    if not (Toggles.StayInServer and Toggles.StayInServer.Value) then
-                        -- Detect already-equipped selected tools when this bot run starts.
+                    local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
+                    if not stay_in_server then
                         for _, other_player in next, plrs:GetPlayers() do
                             if other_player ~= plr and other_player.Character then
                                 for _, tool in next, other_player.Character:GetChildren() do
                                     if tool:IsA("Tool") and emergency_conditions[tool.Name] then
-                                        PriorityEmergencyServerhop(tool.Name, other_player, "initial equipped scan")
+                                        library:Notify(string.format("Player %s already has %s - instant serverhop!", other_player.Name, tool.Name))
+                                        trinket_bot.path_running = false
+                                        TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop (detected on bot start)", other_player.Name, other_player.UserId, tool.Name), nil, true)
                                         break
                                     end
                                 end
                             end
-                            if emergency_priority_hop_sent then break end
                         end
                     end
 
                     emergency_serverhop_connection = track_connection("emergency_serverhop", utility:Connection(ws.Live.DescendantAdded, function(descendant)
-                        -- Whole botting session, not only while path_running=true.
-                        if not IsTrinketBotSessionActive() then return end
-                        if emergency_priority_hop_sent or trinket_bot.priority_emergency_hop then return end
-                        if Toggles.StayInServer and Toggles.StayInServer.Value then return end
+                        if not trinket_bot.path_running then return end
+                        local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
+                        if stay_in_server then return end
 
                         if descendant:IsA("Tool") and emergency_conditions[descendant.Name] then
                             local owner_player = nil
@@ -15504,20 +14654,20 @@ end
                                 ancestor = ancestor.Parent
                             end
 
-                            -- Dropdown condition only triggers for another player's equipped tool.
                             if owner_player and owner_player ~= plr then
-                                PriorityEmergencyServerhop(descendant.Name, owner_player, "Live.DescendantAdded")
+                                library:Notify(string.format("Player %s has %s - instant serverhop!", owner_player.Name, descendant.Name))
+                                trinket_bot.path_running = false
+                                TrinketBotServerhop(string.format("Player %s (%s) has dangerous item: %s - instant serverhop", owner_player.Name, owner_player.UserId, descendant.Name), nil, true)
+                            elseif not owner_player then
+                                library:Notify(string.format("Dangerous item %s detected in server - instant serverhop!", descendant.Name))
+                                trinket_bot.path_running = false
+                                TrinketBotServerhop(string.format("Dangerous item %s detected in server - instant serverhop (no owner identified)", descendant.Name), nil, true)
                             end
                         end
                     end))
                 end
 
                 -- Dangerous Spells in Range (600 studs) - separate from emergency conditions
-                -- Spindulys / Justice Spears only trigger while actually equipped in the Character.
-                local equipped_only_dangerous_spells = {
-                    ["Spindulys"] = true,
-                    ["Justice Spears"] = true
-                }
                 local dangerous_spells = Options.DangerousSpellsInRange and Options.DangerousSpellsInRange.Value or {}
                 if next(dangerous_spells) ~= nil then
                     local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
@@ -15539,14 +14689,10 @@ end
                                         for _, container in ipairs(containers) do
                                             for _, tool in next, container:GetChildren() do
                                                 if tool:IsA("Tool") and dangerous_spells[tool.Name] then
-                                                    local equipped_only = equipped_only_dangerous_spells[tool.Name] == true
-                                                    local is_equipped = other_player.Character and tool.Parent == other_player.Character
-                                                    if (not equipped_only) or is_equipped then
-                                                        library:Notify(string.format("Player %s has %s within %.0f studs%s - serverhop!", other_player.Name, tool.Name, dist, equipped_only and " (equipped)" or ""))
-                                                        trinket_bot.path_running = false
-                                                        TrinketBotServerhop(string.format("Player %s has dangerous spell %s within %.0f studs%s", other_player.Name, tool.Name, dist, equipped_only and " (equipped)" or ""), nil, true)
-                                                        return
-                                                    end
+                                                    library:Notify(string.format("Player %s has %s within %.0f studs - serverhop!", other_player.Name, tool.Name, dist))
+                                                    trinket_bot.path_running = false
+                                                    TrinketBotServerhop(string.format("Player %s has dangerous spell %s within %.0f studs", other_player.Name, tool.Name, dist), nil, true)
+                                                    return
                                                 end
                                             end
                                         end
@@ -15577,15 +14723,11 @@ end
                                     for _, container in ipairs(containers) do
                                         for _, tool in next, container:GetChildren() do
                                             if tool:IsA("Tool") and dangerous_spells[tool.Name] then
-                                                local equipped_only = equipped_only_dangerous_spells[tool.Name] == true
-                                                local is_equipped = other_player.Character and tool.Parent == other_player.Character
-                                                if (not equipped_only) or is_equipped then
-                                                    local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
-                                                    library:Notify(string.format("Player %s has %s within %.0f studs%s - serverhop!", other_player.Name, tool.Name, dist, equipped_only and " (equipped)" or ""))
-                                                    trinket_bot.path_running = false
-                                                    TrinketBotServerhop(string.format("Player %s has dangerous spell %s within %.0f studs%s", other_player.Name, tool.Name, dist, equipped_only and " (equipped)" or ""), nil, true)
-                                                    return
-                                                end
+                                                local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
+                                                library:Notify(string.format("Player %s has %s within %.0f studs - serverhop!", other_player.Name, tool.Name, dist))
+                                                trinket_bot.path_running = false
+                                                TrinketBotServerhop(string.format("Player %s has dangerous spell %s within %.0f studs", other_player.Name, tool.Name, dist), nil, true)
+                                                return
                                             end
                                         end
                                     end
@@ -15595,482 +14737,85 @@ end
                     end)))
                 end
 
-                -- KHEI BED ESCAPE WATCHER:
-                -- Do not wait until Gate() notices the problem. During a live bot session in Khei,
-                -- if the humanoid starts looking seated/platform-stood/laid sideways, immediately
-                -- pop it upright and send one Space press. A short cooldown prevents key spam while
-                -- still allowing another jump if a bed grabs the character again.
-                do
-                    local last_bed_escape_at = 0
-                    local BED_ESCAPE_COOLDOWN = 0.75
+                -- STRICT: in combat (Danger tag) + player within 450 studs = instant kick, no delay
+                -- uses botstarted (not path_running) so it stays active even mid-serverhop transition
+                track_connection("combat_proximity_kick", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
+                    if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then return end
 
-                    local function looks_like_khei_bed_state(character, humanoid, root)
-                        if not character or not humanoid or not root then return false end
+                    local character = plr.Character
+                    if not character then return end
 
-                        local state = humanoid:GetState()
-                        local up_y = math.abs(root.CFrame.UpVector.Y)
-                        local laid_sideways = up_y < 0.55
-                        local has_seat = humanoid.SeatPart ~= nil
+                    local in_danger = cs:HasTag(character, "Danger") or FindFirstChild(character, "Danger")
+                    if not in_danger then return end
 
-                        return humanoid.Sit
-                            or humanoid.PlatformStand
-                            or has_seat
-                            or state == Enum.HumanoidStateType.Seated
-                            or state == Enum.HumanoidStateType.PlatformStanding
-                            or laid_sideways
-                    end
+                    local bot_hrp = FindFirstChild(character, "HumanoidRootPart")
+                    if not bot_hrp then return end
 
-                    local function jump_out_of_khei_bed(character, humanoid)
-                        if not character or not humanoid then return end
+                    for _, other_player in next, plrs:GetPlayers() do
+                        if other_player ~= plr then
+                            local other_hrp = other_player.Character and FindFirstChild(other_player.Character, "HumanoidRootPart")
+                            if other_hrp then
+                                local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
+                                if dist <= 450 then
+                                    trinket_bot.path_running = false
+                                    local message = string.format("In combat + player %s within %.0f studs - COMBAT LOG", other_player.Name, dist)
 
-                        pcall(function()
-                            humanoid.Sit = false
-                            humanoid.PlatformStand = false
-                            humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-                            humanoid.Jump = true
-                        end)
-
-                        task.spawn(function()
-                            pcall(function()
-                                if vim then
-                                    vim:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-                                    task.wait(0.06)
-                                    vim:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-                                end
-                            end)
-
-                            pcall(function()
-                                if humanoid and humanoid.Parent then
-                                    humanoid.Sit = false
-                                    humanoid.PlatformStand = false
-                                    humanoid.Jump = true
-                                    humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-                                end
-                            end)
-                        end)
-                    end
-
-                    track_connection("khei_bed_escape_watchdog", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
-                        if not is_khei then return end
-                        if shared.is_unloading then return end
-                        if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then return end
-
-                        local character = plr.Character
-                        local humanoid = character and FindFirstChildOfClass(character, "Humanoid")
-                        local root = character and FindFirstChild(character, "HumanoidRootPart")
-                        if not humanoid or not root then return end
-
-                        if looks_like_khei_bed_state(character, humanoid, root) then
-                            local now = tick()
-                            if now - last_bed_escape_at >= BED_ESCAPE_COOLDOWN then
-                                last_bed_escape_at = now
-                                warn(string.format(
-                                    "[KHEI BED] suspicious bed/lying state detected (state=%s Sit=%s PlatformStand=%s UpY=%.2f) - SPACE now",
-                                    tostring(humanoid:GetState()),
-                                    tostring(humanoid.Sit),
-                                    tostring(humanoid.PlatformStand),
-                                    math.abs(root.CFrame.UpVector.Y)
-                                ))
-                                jump_out_of_khei_bed(character, humanoid)
-                            end
-                        end
-                    end)))
-                end
-
-                -- STRICT COMBAT LOG:
-                -- Keep this alive for the entire bot session (not just while path_running=true).
-                -- Khei can expose combat through more than one state representation, so accept
-                -- Danger/InCombat/Combat as CollectionService tags, children, or boolean attributes.
-                -- If any non-local player is within 450 studs, use the cloned original Kick method
-                -- immediately; this avoids relying on a potentially hooked Player:Kick method.
-                do
-                    local COMBAT_LOG_RANGE = 450
-                    local combat_log_triggered = false
-
-                    local function has_truthy_combat_attribute(character, name)
-                        local ok, value = pcall(function()
-                            return character:GetAttribute(name)
-                        end)
-                        if not ok then return false end
-                        return value == true or value == 1 or value == "true" or value == "1"
-                    end
-
-                    local function is_character_in_combat(character)
-                        if not character then return false end
-
-                        local combat_names = {"Danger", "InCombat", "Combat", "CombatTag"}
-                        for _, name in ipairs(combat_names) do
-                            local tagged = false
-                            pcall(function()
-                                tagged = cs:HasTag(character, name)
-                            end)
-                            if tagged then return true end
-
-                            local child = nil
-                            pcall(function()
-                                child = character:FindFirstChild(name, true)
-                            end)
-                            if child then return true end
-
-                            if has_truthy_combat_attribute(character, name) then
-                                return true
-                            end
-                        end
-
-                        -- Last-resort compatibility: if Khei changes the exact tag spelling,
-                        -- accept a character tag whose name clearly denotes combat/danger.
-                        local ok, tags = pcall(function() return cs:GetTags(character) end)
-                        if ok and type(tags) == "table" then
-                            for _, tag in ipairs(tags) do
-                                local lower = tostring(tag):lower():gsub("[%s_%-]", "")
-                                if lower == "danger"
-                                    or lower == "incombat"
-                                    or lower == "combat"
-                                    or lower == "combattag"
-                                then
-                                    return true
-                                end
-                            end
-                        end
-
-                        return false
-                    end
-
-                    local function trigger_combat_log(other_player, dist)
-                        if combat_log_triggered then return end
-                        combat_log_triggered = true
-
-                        trinket_bot.path_running = false
-
-                        if active_tween_data.tween then
-                            pcall(function() active_tween_data.tween:Cancel() end)
-                            active_tween_data.tween = nil
-                        end
-                        if active_tween_data.connection then
-                            pcall(function() active_tween_data.connection:Disconnect() end)
-                            active_tween_data.connection = nil
-                        end
-                        active_tween_data.target_position = nil
-
-                        local message = string.format(
-                            "In combat + player %s within %.0f studs - COMBAT LOG",
-                            other_player and other_player.Name or "Unknown",
-                            dist or -1
-                        )
-
-                        -- Queue visibility/logging without delaying the combat log itself.
-                        task.spawn(function()
-                            pcall(function() library:Notify(message) end)
-                            pcall(function() utility:plain_webhook(string.format("@here %s", message)) end)
-                        end)
-
-                        -- Use the cloned original Kick function captured at script startup.
-                        -- Also queue a method-call fallback; if the cloned kick really disconnects us,
-                        -- this deferred fallback never matters, but if it is swallowed it gets one more shot.
-                        pcall(function()
-                            Kick(plr, message)
-                        end)
-                        task.delay(0.15, function()
-                            pcall(function()
-                                if plr and plr.Parent then
+                                    -- kick FIRST, immediately, nothing blocks this
                                     plr:Kick(message)
-                                end
-                            end)
-                        end)
-                    end
 
-                    track_connection("combat_proximity_kick", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
-                        if combat_log_triggered then return end
-                        if shared.is_unloading then return end
-                        if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then return end
-
-                        local character = plr.Character
-                        if not character or not is_character_in_combat(character) then return end
-
-                        local bot_hrp = FindFirstChild(character, "HumanoidRootPart")
-                        if not bot_hrp then return end
-
-                        for _, other_player in next, plrs:GetPlayers() do
-                            if other_player ~= plr then
-                                local other_character = other_player.Character
-                                local other_hrp = other_character and FindFirstChild(other_character, "HumanoidRootPart")
-                                local other_humanoid = other_character and FindFirstChildOfClass(other_character, "Humanoid")
-
-                                if other_hrp and (not other_humanoid or other_humanoid.Health > 0) then
-                                    local dist = (bot_hrp.Position - other_hrp.Position).Magnitude
-                                    if dist <= COMBAT_LOG_RANGE then
-                                        trigger_combat_log(other_player, dist)
-                                        return
-                                    end
-                                end
-                            end
-                        end
-                    end)))
-                end
-
-                -- Continuous bot-session MENU watchdog only.
-                -- If StartMenu remains present for >10s, retry one RANDOM serverhop.
-                -- If still in the same menu, retry again every 10s. No transition escalation.
-                do
-                    local menu_since = nil
-                    local last_seen_job_id = game.JobId
-
-                    track_connection("stuck_menu_watchdog", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
-                        if not IsTrinketBotSessionActive() then
-                            menu_since = nil
-                            if menu_recovery_job_id ~= game.JobId then
-                                ResetMenuServerhopRecovery()
-                            end
-                            return
-                        end
-
-                        if last_seen_job_id ~= game.JobId then
-                            last_seen_job_id = game.JobId
-                            menu_since = nil
-                            ResetMenuServerhopRecovery()
-                            return
-                        end
-
-                        -- Artifact Kick-on-Trinket owns the session until it kicks.
-                        if trinket_bot.artifact_kick_flow_active then
-                            menu_since = nil
-                            return
-                        end
-
-                        if not CanSessionWatchdogHop() then
-                            menu_since = nil
-                            return
-                        end
-
-                        local player_gui = plr:FindFirstChild("PlayerGui")
-                        local start_menu = player_gui and FindFirstChild(player_gui, "StartMenu")
-
-                        if start_menu then
-                            menu_since = menu_since or tick()
-                            local menu_age = tick() - menu_since
-                            if menu_age >= MENU_SERVERHOP_TIMEOUT then
-                                StartSessionHopLoop(false, "continuous StartMenu random retry", menu_age, false)
-                            end
-                            return
-                        end
-
-                        if menu_since then
-                            menu_since = nil
-                            ResetMenuServerhopRecovery()
-                        end
-                    end)))
-                end
-
-                -- Path-progress watchdog:
-                -- The existing watchdog only protects the menu state. This one protects the live
-                -- path itself (especially the recurring "back at point 1 and frozen" case).
-                -- If the current point makes no meaningful progress for too long, cancel the active
-                -- tween and force the normal TrinketBot serverhop flow so botting can continue.
-                do
-                    local watched_point_index = -1
-                    local no_progress_since = tick()
-                    local last_sample_position = nil
-                    local missing_root_since = nil
-                    local gate_wait_since = nil
-                    local khei_gate_space_attempted = false
-                    local khei_gate_space_at = nil
-
-                    local function press_space_for_khei_gate_recovery()
-                        local character = plr.Character
-                        local humanoid = character and FindFirstChildOfClass(character, "Humanoid")
-
-                        pcall(function()
-                            if humanoid then
-                                humanoid.Sit = false
-                                humanoid.PlatformStand = false
-                                humanoid.Jump = true
-                                humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-                            end
-                        end)
-
-                        task.spawn(function()
-                            pcall(function()
-                                vim:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-                                task.wait(0.08)
-                                vim:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-                            end)
-                        end)
-                    end
-
-                    local function force_path_watchdog_hop(reason)
-                        if trinket_bot.path_watchdog_busy or trinket_bot.hop_in_progress then
-                            return
-                        end
-
-                        trinket_bot.path_watchdog_busy = true
-                        trinket_bot.path_running = false
-
-                        if active_tween_data.tween then
-                            pcall(function() active_tween_data.tween:Cancel() end)
-                            active_tween_data.tween = nil
-                        end
-                        if active_tween_data.connection then
-                            pcall(function() active_tween_data.connection:Disconnect() end)
-                            active_tween_data.connection = nil
-                        end
-                        active_tween_data.target_position = nil
-
-                        pcall(function()
-                            library:Notify("WATCHDOG: " .. reason .. " - serverhopping")
-                        end)
-                        pcall(function()
-                            utility:plain_webhook("@here WATCHDOG: " .. reason .. " - forcing serverhop")
-                        end)
-
-                        task.spawn(function()
-                            TrinketBotServerhop("Path watchdog: " .. reason, true, true)
-                            trinket_bot.path_watchdog_busy = false
-                        end)
-                    end
-
-                    track_connection("path_progress_watchdog", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
-                        if test_mode or shared.is_unloading then
-                            return
-                        end
-
-                        if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then
-                            watched_point_index = -1
-                            no_progress_since = tick()
-                            last_sample_position = nil
-                            missing_root_since = nil
-                            gate_wait_since = nil
-                            khei_gate_space_attempted = false
-                            khei_gate_space_at = nil
-                            return
-                        end
-
-                        -- Once an Artifact/selected Kick-on-Trinket item is found, do not let
-                        -- any path watchdog or recovery serverhop interrupt the finish-and-kick flow.
-                        if trinket_bot.artifact_kick_flow_active then
-                            watched_point_index = -1
-                            no_progress_since = tick()
-                            last_sample_position = nil
-                            missing_root_since = nil
-                            gate_wait_since = nil
-                            khei_gate_space_attempted = false
-                            khei_gate_space_at = nil
-                            return
-                        end
-
-                        if not trinket_bot.path_running or trinket_bot.hop_in_progress or trinket_bot.path_watchdog_busy then
-                            watched_point_index = -1
-                            no_progress_since = tick()
-                            last_sample_position = nil
-                            missing_root_since = nil
-                            return
-                        end
-
-                        -- Gate has its own waits. In Khei, a bed/seated state can leave Gate stuck.
-                        -- Recovery policy: after 25s stuck, press Space once; if Gate still has not
-                        -- recovered 10s later, serverhop. If Gate clears, path continues normally.
-                        if trinket_bot.gate_in_progress then
-                            gate_wait_since = gate_wait_since or tick()
-                            no_progress_since = tick()
-                            last_sample_position = nil
-
-                            local gate_age = tick() - gate_wait_since
-                            if is_khei then
-                                if gate_age >= 25 and not khei_gate_space_attempted then
-                                    khei_gate_space_attempted = true
-                                    khei_gate_space_at = tick()
-                                    warn("[KHEI GATE WATCHDOG] Gate stuck 25s - pressing Space once before considering serverhop")
-                                    pcall(function()
-                                        library:Notify("Khei Gate stuck - jumping once to recover")
+                                    -- fire notify/webhook after (non-blocking, best effort)
+                                    task.spawn(function()
+                                        pcall(function() library:Notify(message) end)
+                                        pcall(function() utility:plain_webhook(string.format("@here %s", message)) end)
                                     end)
-                                    press_space_for_khei_gate_recovery()
-                                elseif khei_gate_space_attempted
-                                    and khei_gate_space_at
-                                    and (tick() - khei_gate_space_at) >= 10
-                                then
-                                    force_path_watchdog_hop("Khei Gate still stuck 10s after Space recovery")
+
+                                    return
                                 end
-                            elseif gate_age >= 60 then
-                                force_path_watchdog_hop("Gate state stuck for 60s")
                             end
-                            return
                         end
-                        gate_wait_since = nil
-                        khei_gate_space_attempted = false
-                        khei_gate_space_at = nil
+                    end
+                end)))
 
-                        local character = plr.Character
-                        local root_part = character and FindFirstChild(character, "HumanoidRootPart")
-                        local now = tick()
-
-                        if not root_part then
-                            missing_root_since = missing_root_since or now
-                            if now - missing_root_since >= 10 then
-                                force_path_watchdog_hop("HumanoidRootPart missing for 10s during path")
-                            end
-                            return
-                        end
-                        missing_root_since = nil
-
-                        local point_index = tonumber(trinket_bot.current_point_index) or 0
-                        if point_index ~= watched_point_index then
-                            watched_point_index = point_index
-                            no_progress_since = now
-                            last_sample_position = root_part.Position
-                            trinket_bot.last_path_progress_at = now
-                            trinket_bot.last_path_position = root_part.Position
+                -- Watchdog: bot stuck at menu (path stopped, no hop in progress) for too long -> force hop, then kick
+                do
+                    local stuck_timer_start = nil
+                    local forced_retry_count = 0
+                    track_connection("stuck_menu_watchdog", utility:Connection(rs.Heartbeat, LPH_NO_VIRTUALIZE(function()
+                        if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then
+                            stuck_timer_start = nil
+                            forced_retry_count = 0
                             return
                         end
 
-                        if not last_sample_position then
-                            last_sample_position = root_part.Position
-                            no_progress_since = now
+                        if trinket_bot.path_running or trinket_bot.hop_in_progress then
+                            stuck_timer_start = nil
+                            forced_retry_count = 0
                             return
                         end
 
-                        local moved = (root_part.Position - last_sample_position).Magnitude
-                        if moved >= 5 then
-                            last_sample_position = root_part.Position
-                            no_progress_since = now
-                            trinket_bot.last_path_progress_at = now
-                            trinket_bot.last_path_position = root_part.Position
+                        if not stuck_timer_start then
+                            stuck_timer_start = tick()
                             return
                         end
 
-                        -- Do not fire while a normal SmoothTeleport is still inside its expected
-                        -- travel window. Give it a small grace period for low FPS / replication.
-                        if now <= (trinket_bot.expected_teleport_until or 0) + 4 then
-                            return
-                        end
+                        local stuck_duration = tick() - stuck_timer_start
 
-                        local point = point_index > 0 and trinket_bot.path_points[point_index] or nil
-                        local point_elapsed = now - (trinket_bot.current_point_started_at or now)
-                        local stalled_for = now - no_progress_since
-                        local max_point_time = (point_index == 1) and 20 or 35
-
-                        if point and point.wait_time and point.wait_time > 0 then
-                            max_point_time = math.max(max_point_time, point.wait_time + 15)
-                        end
-                        if point and point.wait_for_trinket then
-                            max_point_time = math.max(max_point_time, 30)
-                        end
-
-                        local far_from_target = false
-                        local target_distance = 0
-                        if point and point.position then
-                            target_distance = (root_part.Position - point.position).Magnitude
-                            far_from_target = target_distance > 250
-                        end
-
-                        -- Point 1 gets a tighter timeout because this is the known recurring freeze.
-                        -- Other points get more room, but a clearly off-path stationary state also hops.
-                        if point_index == 1 and point_elapsed >= max_point_time and stalled_for >= 12 then
-                            force_path_watchdog_hop(string.format("stuck at point 1 for %.0fs", point_elapsed))
-                        elseif point_index > 0 and point_elapsed >= max_point_time and stalled_for >= 18 then
-                            force_path_watchdog_hop(string.format("stuck at point %d for %.0fs", point_index, point_elapsed))
-                        elseif point_index > 0 and far_from_target and point_elapsed >= 18 and stalled_for >= 12 then
-                            force_path_watchdog_hop(string.format("off-path at point %d (%.0f studs away, no movement %.0fs)", point_index, target_distance, stalled_for))
-                        elseif point_index == 0 and stalled_for >= 35 then
-                            force_path_watchdog_hop("path started but never reached point 1")
+                        if stuck_duration > 15 and forced_retry_count < 2 then
+                            forced_retry_count = forced_retry_count + 1
+                            stuck_timer_start = tick()
+                            warn(string.format("[WATCHDOG] Bot stuck at menu for 15s+ (attempt %d/2) - forcing serverhop", forced_retry_count))
+                            pcall(function()
+                                utility:plain_webhook(string.format("@here WATCHDOG: Bot stuck at menu 15s+ - forcing serverhop (attempt %d/2)", forced_retry_count))
+                            end)
+                            task.spawn(function()
+                                TrinketBotServerhop("Watchdog: recovered from stuck menu state", true, true)
+                            end)
+                        elseif stuck_duration > 15 and forced_retry_count >= 2 then
+                            warn("[WATCHDOG] Bot still stuck after 2 forced hop attempts - kicking")
+                            pcall(function()
+                                utility:plain_webhook("@here WATCHDOG: Bot still stuck after 2 forced hops - kicking")
+                            end)
+                            plr:Kick("Watchdog: stuck at menu after repeated forced serverhop attempts")
                         end
                     end)))
                 end
@@ -16654,13 +15399,6 @@ end
 
                 local i = 1
                 while i <= #trinket_bot.path_points do
-                    trinket_bot.current_point_index = i
-                    trinket_bot.current_point_started_at = tick()
-                    trinket_bot.last_path_progress_at = tick()
-                    if plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") then
-                        trinket_bot.last_path_position = plr.Character.HumanoidRootPart.Position
-                    end
-
                     if trinket_bot.moderator_detected then
                         library:Notify("Moderator detected - exiting main loop")
                         break
@@ -17941,7 +16679,6 @@ end
                         if trinket_bot.original_point_1_position then
                             local dist_to_original_p1 = (point.position - trinket_bot.original_point_1_position).Magnitude
                             if dist_to_original_p1 < 5 and i > 1 then
-                                trinket_bot.path_running = false
                                 TrinketBotServerhop("back to point 1!!!", nil, true)
                                 return
                             end
@@ -18206,7 +16943,6 @@ end
                                     end
                                 end
 
-                                trinket_bot.path_running = false
                                 TrinketBotServerhop(string.format("Player %s blocking path so i traversed back to point 1!!", player_name), nil, true)
                                 return
                             end
@@ -18215,9 +16951,6 @@ end
 
                     i = i + 1
                 end
-
-                trinket_bot.current_point_index = 0
-                trinket_bot.current_point_started_at = 0
 
                 if kick_after_path then
                     library:Notify(string.format("Reached last point! Kicking for %s...", kick_trinket_name))
@@ -18618,8 +17351,6 @@ end
                 DoubleClick = true,
                 Func = function()
                     trinket_bot.path_points = {}
-                    trinket_bot.selected_edit_point_index = nil
-                    free_drag.active = false
                     library:Notify("Cleared all points")
                     if update_visualizations then
                         update_visualizations()
@@ -18695,148 +17426,6 @@ end
                 Callback = function(value)
                     trinket_bot.visualize_enabled = value
                     update_visualizations()
-                end
-            })
-
-            group_trinket_bot:AddToggle("EditPathPoints", {
-                Text = "Edit / Drag Path Points",
-                Default = false,
-                Tooltip = "Click any visualized point to select it, drag the sphere freely, or use the X/Y/Z handles for precise adjustment.",
-                Callback = function(value)
-                    trinket_bot.edit_mode_enabled = value
-                    free_drag.active = false
-
-                    if value then
-                        if Toggles.VisualizePoints and not Toggles.VisualizePoints.Value then
-                            Toggles.VisualizePoints:SetValue(true)
-                        else
-                            trinket_bot.visualize_enabled = true
-                            update_visualizations()
-                        end
-
-                        if #trinket_bot.path_points == 0 then
-                            set_point_editor_status("Point Editor: no path loaded")
-                            library:Notify("Load or create a path first, then click any point to edit it")
-                        else
-                            set_point_editor_status("Point Editor: click any path point")
-                        end
-                    else
-                        trinket_bot.selected_edit_point_index = nil
-                        destroy_point_editor_adornments()
-                        set_point_editor_status("Point Editor: OFF")
-                    end
-                end
-            })
-
-            point_editor_status_label = group_trinket_bot:AddLabel("Point Editor: OFF")
-            group_trinket_bot:AddLabel("Drag sphere = free adjust | Handles = exact X/Y/Z")
-
-            group_trinket_bot:AddInput("EditPathPointIndex", {
-                Default = "1",
-                Numeric = true,
-                Finished = false,
-                Text = "Point # to Edit",
-                Placeholder = "1"
-            })
-
-            group_trinket_bot:AddButton({
-                Text = "Select Point #",
-                Func = function()
-                    if not trinket_bot.edit_mode_enabled then
-                        if Toggles.EditPathPoints then
-                            Toggles.EditPathPoints:SetValue(true)
-                        else
-                            trinket_bot.edit_mode_enabled = true
-                        end
-                    end
-
-                    local point_index = tonumber(Options.EditPathPointIndex and Options.EditPathPointIndex.Value or "")
-                    if not point_index then
-                        library:Notify("Enter a valid point number!")
-                        return
-                    end
-
-                    trinket_bot.visualize_enabled = true
-                    update_visualizations()
-                    select_path_point(math.floor(point_index), true)
-                end
-            })
-
-            group_trinket_bot:AddButton({
-                Text = "Move Selected Point Here",
-                Func = function()
-                    local point_index = tonumber(trinket_bot.selected_edit_point_index)
-                    local point = point_index and trinket_bot.path_points[point_index] or nil
-                    local root = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart")
-
-                    if not point then
-                        library:Notify("Select a path point first!")
-                        return
-                    end
-                    if not root then
-                        library:Notify("Character not found!")
-                        return
-                    end
-
-                    point.position = root.Position
-                    update_visualizations()
-                    select_path_point(point_index, false)
-                    library:Notify(string.format("Moved point #%d to your current position", point_index))
-                end
-            })
-
-            group_trinket_bot:AddButton({
-                Text = "Insert Point After Selected",
-                Func = function()
-                    local point_index = tonumber(trinket_bot.selected_edit_point_index)
-                    local root = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart")
-
-                    if not point_index or not trinket_bot.path_points[point_index] then
-                        library:Notify("Select a path point first!")
-                        return
-                    end
-                    if not root then
-                        library:Notify("Character not found!")
-                        return
-                    end
-
-                    local wait_time = tonumber(Options.PointWaitTime and Options.PointWaitTime.Value or "0") or 0
-                    local new_index = point_index + 1
-                    table.insert(trinket_bot.path_points, new_index, {
-                        position = root.Position,
-                        wait_for_trinket = false,
-                        wait_time = wait_time
-                    })
-
-                    trinket_bot.selected_edit_point_index = new_index
-                    update_visualizations()
-                    select_path_point(new_index, false)
-                    library:Notify(string.format("Inserted new point #%d without removing later points", new_index))
-                end
-            })
-
-            group_trinket_bot:AddButton({
-                Text = "Delete Selected Point",
-                Func = function()
-                    local point_index = tonumber(trinket_bot.selected_edit_point_index)
-                    if not point_index or not trinket_bot.path_points[point_index] then
-                        library:Notify("Select a path point first!")
-                        return
-                    end
-
-                    table.remove(trinket_bot.path_points, point_index)
-
-                    if #trinket_bot.path_points == 0 then
-                        trinket_bot.selected_edit_point_index = nil
-                    else
-                        trinket_bot.selected_edit_point_index = math.min(point_index, #trinket_bot.path_points)
-                    end
-
-                    update_visualizations()
-                    if trinket_bot.selected_edit_point_index then
-                        select_path_point(trinket_bot.selected_edit_point_index, false)
-                    end
-                    library:Notify(string.format("Deleted point #%d; later points were re-indexed automatically", point_index))
                 end
             })
 
@@ -19148,10 +17737,10 @@ end
 
             group_trinket_bot:AddDropdown("DangerousSpellsInRange", {
                 Text = "Dangerous Spells (600 studs)",
-                Tooltip = "Serverhop if another player has these within 600 studs. Spindulys and Justice Spears only trigger while equipped in Character (not Backpack).",
-                Values = {"Fimbulvetr", "Dagger Throw", "Armis", "Opal Shard", "Spindulys", "Justice Spears"},
+                Tooltip = "Serverhop if another player has these in backpack/character within 600 studs",
+                Values = {"Fimbulvetr", "Dagger Throw", "Armis", "Opal Shard"},
                 Multi = true,
-                Default = {"Fimbulvetr", "Dagger Throw", "Armis", "Opal Shard", "Spindulys", "Justice Spears"},
+                Default = {"Fimbulvetr", "Dagger Throw", "Armis", "Opal Shard"},
                 Compact = true
             })
 
@@ -19348,20 +17937,7 @@ end
                 if Toggles.PickupTrinkets then Toggles.PickupTrinkets:SetValue(settings.pickup_trinkets or false) end
                 if Toggles.DisableGPURendering then Toggles.DisableGPURendering:SetValue(settings.disable_gpu_rendering or false) end
                 if Options.EmergencyServerhopConditions then Options.EmergencyServerhopConditions:SetValue(settings.emergency_serverhop_conditions or {}) end
-                if Options.DangerousSpellsInRange then
-                    local dangerous_spells_setting = settings.dangerous_spells_in_range
-                    if type(dangerous_spells_setting) ~= "table" then
-                        dangerous_spells_setting = {
-                            ["Fimbulvetr"] = true, ["Dagger Throw"] = true, ["Armis"] = true, ["Opal Shard"] = true,
-                            ["Spindulys"] = true, ["Justice Spears"] = true
-                        }
-                    elseif settings.dangerous_equipped_spells_v1 ~= true then
-                        -- One-time migration for old saved paths. After the path is saved again, user choices are preserved.
-                        dangerous_spells_setting["Spindulys"] = true
-                        dangerous_spells_setting["Justice Spears"] = true
-                    end
-                    Options.DangerousSpellsInRange:SetValue(dangerous_spells_setting)
-                end
+                if Options.DangerousSpellsInRange then Options.DangerousSpellsInRange:SetValue(settings.dangerous_spells_in_range or {}) end
                 if Toggles.JoinOldestServer then Toggles.JoinOldestServer:SetValue(settings.join_oldest_server or false) end
                 if Toggles.AutoPopPDs then Toggles.AutoPopPDs:SetValue(settings.auto_pop_pds or false) end
                 if Options.AutoDropItems then Options.AutoDropItems:SetValue(settings.auto_drop_items or {}) end
@@ -19430,8 +18006,6 @@ end
 
                 if success and save_data and save_data.points and #save_data.points > 0 then
                     trinket_bot.path_points = {}
-                    trinket_bot.selected_edit_point_index = nil
-                    free_drag.active = false
                     for i, point_data in ipairs(save_data.points) do
                         table.insert(trinket_bot.path_points, {
                             position = Vector3.new(point_data.x, point_data.y, point_data.z),
@@ -19442,11 +18016,7 @@ end
                         })
                     end
 
-                    -- Snapshot path-specific settings BEFORE botting. This is the source of truth
-                    -- for behaviors that must belong to this exact Saved Path.
-                    trinket_bot.active_path_settings = type(save_data.settings) == "table" and save_data.settings or {}
-                    trinket_bot.active_path_settings_name = path_name
-                    apply_settings(trinket_bot.active_path_settings)
+                    apply_settings(save_data.settings)
 
                     library:Notify(string.format("Loaded path '%s' with %d points", path_name, #trinket_bot.path_points))
                     update_path_label(path_name)
@@ -19578,7 +18148,7 @@ end
                             plr:Kick("HRP never loaded during auto-start")
                             return
                         end
-                        task.wait(0.1)
+                        task.wait(1)
 
                         local auto_start_death_connection
                         local character = plr.Character
@@ -19617,21 +18187,6 @@ end
                             return
                         end
 
-                        -- SPAWN GRACE: after pressing Play and receiving Character + HRP, give Roblox/UI
-                        -- five full seconds to finish initializing before any recovery movement or point 1.
-                        library:Notify("Spawned - waiting 5 seconds before starting Trinket Bot...")
-                        local spawn_grace_deadline = tick() + 5
-                        while tick() < spawn_grace_deadline do
-                            if not (mem:HasItem("botstarted") and mem:GetItem("botstarted") == "true") then
-                                return
-                            end
-                            if not plr.Character or not plr.Character:FindFirstChild("HumanoidRootPart") then
-                                warn("[AUTO-START] Character/HRP disappeared during 5s spawn grace")
-                                return
-                            end
-                            task.wait(0.1)
-                        end
-
                         local saved_path = mem:GetItem("trinket_bot_path")
                         if not saved_path or saved_path == "" then
                             if auto_start_death_connection then
@@ -19662,10 +18217,16 @@ end
                             return
                         end
 
-                        -- IMPORTANT: do NOT re-apply trinket_bot_settings here.
-                        -- load_path_by_name() already applied the settings stored inside the selected Saved Path.
-                        -- Re-applying MemStorage here used to overwrite path-specific Kick-on-Trinket choices
-                        -- (for example enabling Rift Gem from an older/different path).
+                        if mem:HasItem("trinket_bot_settings") then
+                            local httpService = Services.HttpService
+                            local success, settings = pcall(function()
+                                return httpService:JSONDecode(mem:GetItem("trinket_bot_settings"))
+                            end)
+
+                            if success then
+                                apply_settings(settings)
+                            end
+                        end
 
                         local saved_position = nil
                         if mem:HasItem("lastPlayerPosition") then
@@ -20277,10 +18838,6 @@ end
                 Text = "New Path",
                 Func = function()
                     trinket_bot.path_points = {}
-                    trinket_bot.selected_edit_point_index = nil
-                    trinket_bot.active_path_settings = nil
-                    trinket_bot.active_path_settings_name = ""
-                    free_drag.active = false
                     update_path_label(nil)
                     update_visualizations()
 
@@ -20372,7 +18929,6 @@ end
                             disable_gpu_rendering = Toggles.DisableGPURendering and Toggles.DisableGPURendering.Value or false,
                             emergency_serverhop_conditions = Options.EmergencyServerhopConditions and Options.EmergencyServerhopConditions.Value or {},
                     dangerous_spells_in_range = Options.DangerousSpellsInRange and Options.DangerousSpellsInRange.Value or {},
-                            dangerous_equipped_spells_v1 = true,
                             join_oldest_server = Toggles.JoinOldestServer and Toggles.JoinOldestServer.Value or false,
                             auto_pop_pds = Toggles.AutoPopPDs and Toggles.AutoPopPDs.Value or false,
                             auto_drop_items = Options.AutoDropItems and Options.AutoDropItems.Value or {},
@@ -20405,9 +18961,6 @@ end
                             library:Notify(string.format("Saved path '%s' with %d points", path_name, #trinket_bot.path_points))
                         end
 
-                        -- The just-saved settings now become the authoritative snapshot for this path.
-                        trinket_bot.active_path_settings = save_data.settings
-                        trinket_bot.active_path_settings_name = path_name
                         update_path_label(path_name)
                         if Options.SavedPaths then
                             local paths = get_saved_paths()
@@ -20456,8 +19009,6 @@ end
                         end
 
                         trinket_bot.path_points = {}
-                        trinket_bot.selected_edit_point_index = nil
-                        free_drag.active = false
                         update_visualizations()
                     else
                         library:Notify("Failed to delete path: " .. tostring(err))
@@ -20495,7 +19046,6 @@ end
                         kick_after_path = false
                         kick_debounce = false
                         kick_trinket_name = ""
-                        trinket_bot.artifact_kick_flow_active = false
 
                         current_gate_section = 0
                         player_encounters = {}
@@ -20551,17 +19101,12 @@ end
                             shared.characterAddedConnection = nil
                         end
 
-                        destroy_point_editor_adornments()
-                        free_drag.active = false
-                        trinket_bot.selected_edit_point_index = nil
-
                         for _, part in ipairs(trinket_bot.point_visualizations) do
                             if part and part.Parent then
                                 part:Destroy()
                             end
                         end
                         trinket_bot.point_visualizations = {}
-                        trinket_bot.point_spheres = {}
 
                         if trinket_bot.connections then
                             for name, conn in pairs(trinket_bot.connections) do
@@ -20987,26 +19532,16 @@ end
 
                     task.wait(0.05)
 
-                    if not kick_debounce then
-                        local kick_enabled, selected_trinkets, settings_source = get_active_path_kick_settings()
-                        if kick_enabled then
-                            local matched, configured_name = kick_selection_contains(selected_trinkets, obj.Name)
-                            if matched then
+                    if not kick_debounce and Toggles.KickOnTrinket and Toggles.KickOnTrinket.Value and Options.KickTrinketList and Options.KickTrinketList.Value then
+                        local selected_trinkets = Options.KickTrinketList.Value
+                        for trinket_name, _ in next, selected_trinkets do
+                            if obj.Name:gsub(" ", "") == trinket_name:gsub(" ", "") then
                                 kick_debounce = true
                                 kick_after_path = true
-                                kick_trinket_name = configured_name or obj.Name
-                                trinket_bot.artifact_kick_flow_active = true
-
-                                -- Preserve the ORIGINAL Kick-on-Trinket behavior:
-                                -- keep botting / gate toward the final section, reach the last point,
-                                -- then Notify/Webhook and Kick. While this flow owns the session,
-                                -- watchdogs and unrelated serverhop recovery are not allowed to interrupt it.
-                                trinket_bot.hop_in_progress = false
-                                trinket_bot.path_watchdog_busy = false
-
-                                print(string.format("[Kick on Trinket] MATCH FOUND: %s (source=%s) - will kick after reaching last point; watchdog/serverhop suppressed", obj.Name, settings_source))
-                                utility:plain_webhook(string.format("@here %s found! Going to last point then kicking. [%s]", kick_trinket_name, settings_source))
-                                library:Notify(string.format("%s found! Going to last point...", kick_trinket_name))
+                                kick_trinket_name = trinket_name
+                                print(string.format("[Kick on Trinket] MATCH FOUND: %s - will kick after reaching last point", obj.Name))
+                                utility:plain_webhook(string.format("@here %s found! Going to last point then kicking.", trinket_name))
+                                library:Notify(string.format("%s found! Going to last point...", trinket_name))
                                 return
                             end
                         end
@@ -23572,8 +22107,8 @@ end
         end
 
         if isfile(model_path) then
+            local asset = getcustomasset(model_path)
             local success, model = pcall(function()
-                local asset = getcustomasset(model_path)
                 return game:GetObjects(asset)[1]
             end)
 
@@ -23581,14 +22116,6 @@ end
                 legit_intent_gui = model
             else
                 warn("failed to load intent model:", model)
-
-                -- A corrupt/stale cached RBXM otherwise fails again after every serverhop.
-                -- Remove it so the next execution downloads a fresh copy.
-                pcall(function()
-                    if delfile and isfile(model_path) then
-                        delfile(model_path)
-                    end
-                end)
             end
         end
 
