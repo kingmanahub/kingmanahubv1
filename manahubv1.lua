@@ -12168,7 +12168,19 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 expected_teleport_until = 0,
                 hop_in_progress = false,
                 stuck_since = 0,
-                gate_in_progress = false
+                gate_in_progress = false,
+
+                -- Random-access path editor state
+                edit_mode_enabled = false,
+                selected_edit_point_index = nil,
+                point_spheres = {},
+                point_edit_handles = nil,
+                point_edit_selection = nil,
+
+                -- Death verification state: never treat a local Humanoid death as a lost life
+                -- until the server-reported Lives value is checked after respawn.
+                last_known_lives = nil,
+                death_verification_in_progress = false
             }
 
             cheat_client.trinket_bot = trinket_bot
@@ -12282,6 +12294,262 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 end
             end
 
+            -- Random-access path point editor. Any loaded/created point can be selected and
+            -- adjusted directly; users no longer need to Undo every later point first.
+            local point_editor_connections = {}
+            local point_editor_status_label = nil
+            local handle_drag_origin = nil
+            local handle_drag_active = false
+            local free_drag = {
+                active = false,
+                point_index = nil,
+                plane_origin = nil,
+                plane_normal = nil,
+                offset = Vector3.new(0, 0, 0),
+                moved = false
+            }
+
+            local function disconnect_point_editor_connections()
+                for _, connection in ipairs(point_editor_connections) do
+                    if connection then
+                        pcall(function() connection:Disconnect() end)
+                    end
+                end
+                point_editor_connections = {}
+            end
+
+            local function destroy_point_editor_adornments()
+                disconnect_point_editor_connections()
+
+                if trinket_bot.point_edit_handles then
+                    pcall(function() trinket_bot.point_edit_handles:Destroy() end)
+                    trinket_bot.point_edit_handles = nil
+                end
+
+                if trinket_bot.point_edit_selection then
+                    pcall(function() trinket_bot.point_edit_selection:Destroy() end)
+                    trinket_bot.point_edit_selection = nil
+                end
+
+                handle_drag_origin = nil
+                handle_drag_active = false
+            end
+
+            local function set_point_editor_status(text)
+                if point_editor_status_label and point_editor_status_label.SetText then
+                    point_editor_status_label:SetText(text)
+                end
+            end
+
+            local function face_to_axis(face)
+                if face == Enum.NormalId.Right then
+                    return Vector3.new(1, 0, 0)
+                elseif face == Enum.NormalId.Left then
+                    return Vector3.new(-1, 0, 0)
+                elseif face == Enum.NormalId.Top then
+                    return Vector3.new(0, 1, 0)
+                elseif face == Enum.NormalId.Bottom then
+                    return Vector3.new(0, -1, 0)
+                elseif face == Enum.NormalId.Front then
+                    return Vector3.new(0, 0, -1)
+                elseif face == Enum.NormalId.Back then
+                    return Vector3.new(0, 0, 1)
+                end
+                return Vector3.new(0, 0, 0)
+            end
+
+            local function refresh_point_editor_adornments()
+                destroy_point_editor_adornments()
+
+                if not trinket_bot.edit_mode_enabled then
+                    set_point_editor_status("Point Editor: OFF")
+                    return
+                end
+
+                local point_index = tonumber(trinket_bot.selected_edit_point_index)
+                local point = point_index and trinket_bot.path_points[point_index] or nil
+                local sphere = point_index and trinket_bot.point_spheres[point_index] or nil
+
+                if not point or not sphere or not sphere.Parent then
+                    trinket_bot.selected_edit_point_index = nil
+                    set_point_editor_status("Point Editor: click any path point")
+                    return
+                end
+
+                local selection = Instance.new("SelectionBox")
+                selection.Name = "TrinketPathPointSelection"
+                selection.Adornee = sphere
+                selection.LineThickness = 0.06
+                selection.SurfaceTransparency = 0.82
+                selection.Color3 = Color3.fromRGB(255, 215, 0)
+                selection.Parent = sphere
+                trinket_bot.point_edit_selection = selection
+
+                local handles = Instance.new("Handles")
+                handles.Name = "TrinketPathPointHandles"
+                handles.Adornee = sphere
+                handles.Style = Enum.HandlesStyle.Movement
+                handles.Faces = Faces.new(
+                    Enum.NormalId.Right,
+                    Enum.NormalId.Left,
+                    Enum.NormalId.Top,
+                    Enum.NormalId.Bottom,
+                    Enum.NormalId.Front,
+                    Enum.NormalId.Back
+                )
+                handles.Color3 = Color3.fromRGB(255, 215, 0)
+                handles.Parent = hidden_folder
+                trinket_bot.point_edit_handles = handles
+
+                table.insert(point_editor_connections, handles.MouseButton1Down:Connect(function(face)
+                    local idx = tonumber(trinket_bot.selected_edit_point_index)
+                    local selected_point = idx and trinket_bot.path_points[idx] or nil
+                    if selected_point then
+                        handle_drag_active = true
+                        free_drag.active = false
+                        handle_drag_origin = selected_point.position
+                    end
+                end))
+
+                table.insert(point_editor_connections, handles.MouseDrag:Connect(function(face, distance)
+                    if not trinket_bot.edit_mode_enabled or not handle_drag_origin then return end
+
+                    local idx = tonumber(trinket_bot.selected_edit_point_index)
+                    local selected_point = idx and trinket_bot.path_points[idx] or nil
+                    local selected_sphere = idx and trinket_bot.point_spheres[idx] or nil
+                    if not selected_point or not selected_sphere or not selected_sphere.Parent then return end
+
+                    local axis = face_to_axis(face)
+                    local new_position = handle_drag_origin + (axis * distance)
+                    selected_point.position = new_position
+                    selected_sphere.Position = new_position
+                end))
+
+                table.insert(point_editor_connections, handles.MouseButton1Up:Connect(function()
+                    handle_drag_origin = nil
+                    handle_drag_active = false
+                    local idx = tonumber(trinket_bot.selected_edit_point_index)
+                    if idx then
+                        set_point_editor_status(string.format("Editing Point #%d - drag sphere or X/Y/Z handles", idx))
+                    end
+                end))
+
+                set_point_editor_status(string.format("Editing Point #%d - drag sphere or X/Y/Z handles", point_index))
+            end
+
+            local function select_path_point(point_index, notify_user)
+                point_index = tonumber(point_index)
+                if not point_index or point_index < 1 or point_index > #trinket_bot.path_points then
+                    library:Notify("Invalid point number!")
+                    return false
+                end
+
+                trinket_bot.selected_edit_point_index = point_index
+                if Options and Options.EditPathPointIndex then
+                    pcall(function() Options.EditPathPointIndex:SetValue(tostring(point_index)) end)
+                end
+                refresh_point_editor_adornments()
+
+                if notify_user then
+                    library:Notify(string.format("Selected path point #%d", point_index))
+                end
+                return true
+            end
+
+            local function ray_to_editor_plane(plane_origin, plane_normal)
+                local camera = ws.CurrentCamera
+                if not camera then return nil end
+
+                local ray = camera:ViewportPointToRay(mouse.X, mouse.Y)
+                local denominator = ray.Direction:Dot(plane_normal)
+                if math.abs(denominator) < 0.0001 then
+                    return nil
+                end
+
+                local distance = (plane_origin - ray.Origin):Dot(plane_normal) / denominator
+                if distance <= 0 then
+                    return nil
+                end
+
+                return ray.Origin + (ray.Direction * distance)
+            end
+
+            utility:Connection(uis.InputBegan, function(input, game_processed)
+                if game_processed or not trinket_bot.edit_mode_enabled then return end
+                if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+                if handle_drag_active then return end
+
+                local target = mouse.Target
+                if not target then return end
+
+                local point_index = target:GetAttribute("TrinketPathPointIndex")
+                if not point_index then return end
+
+                point_index = tonumber(point_index)
+                if not select_path_point(point_index, false) then return end
+
+                local camera = ws.CurrentCamera
+                local point = trinket_bot.path_points[point_index]
+                if not camera or not point then return end
+
+                local plane_normal = camera.CFrame.LookVector
+                local plane_origin = point.position
+                local hit_position = ray_to_editor_plane(plane_origin, plane_normal)
+
+                free_drag.active = true
+                free_drag.point_index = point_index
+                free_drag.plane_origin = plane_origin
+                free_drag.plane_normal = plane_normal
+                free_drag.offset = hit_position and (point.position - hit_position) or Vector3.new(0, 0, 0)
+                free_drag.moved = false
+            end)
+
+            utility:Connection(uis.InputEnded, function(input)
+                if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+                if not free_drag.active then return end
+
+                local edited_index = free_drag.point_index
+                local did_move = free_drag.moved
+
+                free_drag.active = false
+                free_drag.point_index = nil
+                free_drag.plane_origin = nil
+                free_drag.plane_normal = nil
+                free_drag.offset = Vector3.new(0, 0, 0)
+                free_drag.moved = false
+
+                if edited_index then
+                    set_point_editor_status(string.format("Editing Point #%d - drag sphere or X/Y/Z handles", edited_index))
+                    if did_move then
+                        library:Notify(string.format("Adjusted point #%d", edited_index))
+                    end
+                end
+            end)
+
+            utility:Connection(rs.RenderStepped, function()
+                if not trinket_bot.edit_mode_enabled or not free_drag.active or handle_drag_active then return end
+                if not uis:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then return end
+
+                local idx = tonumber(free_drag.point_index)
+                local point = idx and trinket_bot.path_points[idx] or nil
+                local sphere = idx and trinket_bot.point_spheres[idx] or nil
+                if not point or not sphere or not sphere.Parent then
+                    free_drag.active = false
+                    return
+                end
+
+                local hit_position = ray_to_editor_plane(free_drag.plane_origin, free_drag.plane_normal)
+                if not hit_position then return end
+
+                local new_position = hit_position + free_drag.offset
+                if (new_position - point.position).Magnitude > 0.01 then
+                    free_drag.moved = true
+                end
+
+                point.position = new_position
+                sphere.Position = new_position
+            end)
+
             local function create_point_visualization(position, is_wait_point, is_gate_point)
                 local sphere = Instance.new("Part")
                 sphere.Shape = Enum.PartType.Ball
@@ -12289,6 +12557,8 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 sphere.Position = position
                 sphere.Anchored = true
                 sphere.CanCollide = false
+                sphere.CanTouch = false
+                sphere.CanQuery = true
                 sphere.Material = Enum.Material.Neon
 
                 if is_gate_point then
@@ -12306,12 +12576,15 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
             end
 
             local function update_visualizations()
+                destroy_point_editor_adornments()
+
                 for _, part in ipairs(trinket_bot.point_visualizations) do
                     if part and part.Parent then
                         pcall(function() part:Destroy() end)
                     end
                 end
                 trinket_bot.point_visualizations = {}
+                trinket_bot.point_spheres = {}
 
                 if trinket_bot.visualize_enabled then
                     local previous_sphere = nil
@@ -12319,6 +12592,8 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                     for i, point in ipairs(trinket_bot.path_points) do
                         local is_gate = point.is_gate_point or false
                         local sphere = create_point_visualization(point.position, point.wait_for_trinket, is_gate)
+                        sphere:SetAttribute("TrinketPathPointIndex", i)
+                        trinket_bot.point_spheres[i] = sphere
                         table.insert(trinket_bot.point_visualizations, sphere)
 
                         local billboard = Instance.new("BillboardGui")
@@ -12333,7 +12608,7 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                         label.BackgroundTransparency = 1
 
                         if is_gate then
-                            label.Text = "G: " .. (point.gate_location or "???")
+                            label.Text = string.format("#%d G: %s", i, point.gate_location or "???")
                             label.TextColor3 = Color3.fromRGB(255, 105, 180)
                         else
                             label.Text = tostring(i)
@@ -12366,6 +12641,10 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
 
                         previous_sphere = sphere
                     end
+                end
+
+                if trinket_bot.edit_mode_enabled then
+                    refresh_point_editor_adornments()
                 end
             end
 
@@ -13977,6 +14256,177 @@ end
                 end
             end
 
+            -- Death/void verification.
+            -- Rogue Lineage can locally kill/respawn the Humanoid without actually consuming a life
+            -- (for example, certain void/fall recoveries). Never kick on Humanoid.Died alone.
+            local function read_trinket_bot_lives(timeout)
+                timeout = tonumber(timeout) or 6
+                local deadline = tick() + timeout
+                local last_value = nil
+                local stable_reads = 0
+
+                repeat
+                    local lives = Get("Lives")
+                    if type(lives) == "number" then
+                        if lives == last_value then
+                            stable_reads = stable_reads + 1
+                        else
+                            last_value = lives
+                            stable_reads = 1
+                        end
+
+                        trinket_bot.last_known_lives = lives
+
+                        -- Two matching reads avoids deciding from a value that is still updating
+                        -- immediately after the respawn transition.
+                        if stable_reads >= 2 then
+                            return lives
+                        end
+                    end
+
+                    task.wait(0.35)
+                until tick() >= deadline
+
+                return last_value
+            end
+
+            local function wait_for_replacement_character(dead_character, timeout)
+                timeout = tonumber(timeout) or 20
+                local deadline = tick() + timeout
+
+                repeat
+                    local current_character = plr.Character
+                    if current_character and current_character ~= dead_character then
+                        local humanoid = FindFirstChildOfClass(current_character, "Humanoid")
+                        local root = FindFirstChild(current_character, "HumanoidRootPart")
+                        if humanoid and root and humanoid.Health > 0 then
+                            return current_character
+                        end
+                    end
+
+                    task.wait(0.15)
+                until tick() >= deadline
+
+                return nil
+            end
+
+            local function resolve_trinket_bot_death(dead_character, lives_before, context, test_mode)
+                if trinket_bot.death_verification_in_progress then
+                    return
+                end
+
+                trinket_bot.death_verification_in_progress = true
+                trinket_bot.path_running = false
+
+                pcall(function()
+                    library:Notify("Character dropped/died locally - waiting for respawn to verify Lives...")
+                end)
+
+                task.spawn(function()
+                    local before = tonumber(lives_before) or tonumber(trinket_bot.last_known_lives)
+
+                    -- Do not invent a "before" value after Humanoid.Died has fired: the server
+                    -- may already have decremented Lives by then. If the healthy snapshot was
+                    -- unavailable, leave it unknown and recover by serverhop rather than risk a
+                    -- false "bot died" kick.
+                    local new_character = wait_for_replacement_character(dead_character, 20)
+
+                    -- Give replicated player data a brief moment to settle after CharacterAdded.
+                    if new_character then
+                        task.wait(1.0)
+                    else
+                        task.wait(0.5)
+                    end
+
+                    local after = read_trinket_bot_lives(7)
+
+                    if test_mode then
+                        trinket_bot.death_verification_in_progress = false
+                        pcall(function()
+                            library:Notify(string.format(
+                                "Death verification (test mode): Lives %s -> %s; no kick/serverhop",
+                                tostring(before),
+                                tostring(after)
+                            ))
+                        end)
+                        return
+                    end
+
+                    -- The only terminal case: the server actually reports that a life was consumed.
+                    if before and after and after < before then
+                        trinket_bot.death_verification_in_progress = false
+
+                        local message = string.format(
+                            "Bot actually died: Lives %d -> %d%s",
+                            before,
+                            after,
+                            context and (" (" .. tostring(context) .. ")") or ""
+                        )
+
+                        pcall(function()
+                            library:Notify(message .. " - kicking")
+                        end)
+                        task.spawn(function()
+                            pcall(function()
+                                utility:plain_webhook("@everyone " .. message .. " - kicking")
+                            end)
+                        end)
+
+                        task.wait(0.2)
+                        pcall(function()
+                            Kick(plr, message)
+                        end)
+                        return
+                    end
+
+                    -- Same life count (e.g. 2 -> 2) means the Humanoid died/respawned but the
+                    -- account did NOT lose a life. Treat it as a void/fall recovery and hop so
+                    -- the existing bot-session auto-resume can continue the saved path.
+                    if before and after and after >= before then
+                        local message = string.format(
+                            "Void/fall recovery: Lives unchanged (%d -> %d) - serverhopping and continuing bot",
+                            before,
+                            after
+                        )
+
+                        pcall(function()
+                            library:Notify(message)
+                        end)
+                        task.spawn(function()
+                            pcall(function()
+                                utility:plain_webhook(message)
+                            end)
+                        end)
+
+                        mem:SetItem("botstarted", "true")
+                        trinket_bot.death_verification_in_progress = false
+                        TrinketBotServerhop(message, true, true)
+                        return
+                    end
+
+                    -- If Lives could not be verified, do NOT falsely announce a death or kick.
+                    -- Recover by hopping and let the next server continue the bot session.
+                    local unknown_message = string.format(
+                        "Death/void recovery: could not verify Lives (%s -> %s) - serverhopping instead of false kick",
+                        tostring(before),
+                        tostring(after)
+                    )
+
+                    pcall(function()
+                        library:Notify(unknown_message)
+                    end)
+                    task.spawn(function()
+                        pcall(function()
+                            utility:plain_webhook(unknown_message)
+                        end)
+                    end)
+
+                    mem:SetItem("botstarted", "true")
+                    trinket_bot.death_verification_in_progress = false
+                    TrinketBotServerhop(unknown_message, true, true)
+                end)
+            end
+
             local function SafeServerhop(reason, skip_test_mode_check, skip_gate_escape, prefer_empty)
                 if prefer_empty == nil then prefer_empty = true end
                 if plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart") then
@@ -14384,27 +14834,22 @@ end
                         humanoid:SetStateEnabled(5, false)
                         humanoid:ChangeState(3)
 
+                        -- Snapshot Lives while the character is healthy. A Humanoid.Died event by
+                        -- itself is not proof that Rogue Lineage actually consumed a life.
+                        local lives_before_death = read_trinket_bot_lives(1.5) or trinket_bot.last_known_lives
+
                         death_connection = track_connection("death", utility:Connection(humanoid.Died, function()
                             if death_connection then
                                 pcall(function() death_connection:Disconnect() end)
+                                death_connection = nil
                             end
 
-                            trinket_bot.path_running = false
-                            pcall(function() library:Notify("Path stopped due to death") end)
-
-                            local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
-                            if test_mode then
-                                pcall(function() library:Notify("You died (test mode - not kicking)") end)
-                            elseif stay_in_server then
-                                pcall(function() library:Notify("You died (stay in server - not kicking)") end)
-                                pcall(function() utility:plain_webhook("@here bot died (stay in server mode)") end)
-                            else
-                                task.spawn(function()
-                                    pcall(function() utility:plain_webhook("@everyone bot died - kicking") end)
-                                    task.wait(0.3)
-                                    plr:Kick("bot died")
-                                end)
-                            end
+                            resolve_trinket_bot_death(
+                                character,
+                                lives_before_death or trinket_bot.last_known_lives,
+                                "path",
+                                test_mode
+                            )
                         end))
                     else
                         trinket_bot.path_running = false
@@ -17429,6 +17874,148 @@ end
                 end
             })
 
+            group_trinket_bot:AddToggle("EditPathPoints", {
+                Text = "Edit / Drag Path Points",
+                Default = false,
+                Tooltip = "Click any visualized point to select it, drag the sphere freely, or use the X/Y/Z handles for precise adjustment.",
+                Callback = function(value)
+                    trinket_bot.edit_mode_enabled = value
+                    free_drag.active = false
+
+                    if value then
+                        if Toggles.VisualizePoints and not Toggles.VisualizePoints.Value then
+                            Toggles.VisualizePoints:SetValue(true)
+                        else
+                            trinket_bot.visualize_enabled = true
+                            update_visualizations()
+                        end
+
+                        if #trinket_bot.path_points == 0 then
+                            set_point_editor_status("Point Editor: no path loaded")
+                            library:Notify("Load or create a path first, then click any point to edit it")
+                        else
+                            set_point_editor_status("Point Editor: click any path point")
+                        end
+                    else
+                        trinket_bot.selected_edit_point_index = nil
+                        destroy_point_editor_adornments()
+                        set_point_editor_status("Point Editor: OFF")
+                    end
+                end
+            })
+
+            point_editor_status_label = group_trinket_bot:AddLabel("Point Editor: OFF")
+            group_trinket_bot:AddLabel("Drag sphere = free adjust | Handles = exact X/Y/Z")
+
+            group_trinket_bot:AddInput("EditPathPointIndex", {
+                Default = "1",
+                Numeric = true,
+                Finished = false,
+                Text = "Point # to Edit",
+                Placeholder = "1"
+            })
+
+            group_trinket_bot:AddButton({
+                Text = "Select Point #",
+                Func = function()
+                    if not trinket_bot.edit_mode_enabled then
+                        if Toggles.EditPathPoints then
+                            Toggles.EditPathPoints:SetValue(true)
+                        else
+                            trinket_bot.edit_mode_enabled = true
+                        end
+                    end
+
+                    local point_index = tonumber(Options.EditPathPointIndex and Options.EditPathPointIndex.Value or "")
+                    if not point_index then
+                        library:Notify("Enter a valid point number!")
+                        return
+                    end
+
+                    trinket_bot.visualize_enabled = true
+                    update_visualizations()
+                    select_path_point(math.floor(point_index), true)
+                end
+            })
+
+            group_trinket_bot:AddButton({
+                Text = "Move Selected Point Here",
+                Func = function()
+                    local point_index = tonumber(trinket_bot.selected_edit_point_index)
+                    local point = point_index and trinket_bot.path_points[point_index] or nil
+                    local root = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart")
+
+                    if not point then
+                        library:Notify("Select a path point first!")
+                        return
+                    end
+                    if not root then
+                        library:Notify("Character not found!")
+                        return
+                    end
+
+                    point.position = root.Position
+                    update_visualizations()
+                    select_path_point(point_index, false)
+                    library:Notify(string.format("Moved point #%d to your current position", point_index))
+                end
+            })
+
+            group_trinket_bot:AddButton({
+                Text = "Insert Point After Selected",
+                Func = function()
+                    local point_index = tonumber(trinket_bot.selected_edit_point_index)
+                    local root = plr.Character and FindFirstChild(plr.Character, "HumanoidRootPart")
+
+                    if not point_index or not trinket_bot.path_points[point_index] then
+                        library:Notify("Select a path point first!")
+                        return
+                    end
+                    if not root then
+                        library:Notify("Character not found!")
+                        return
+                    end
+
+                    local wait_time = tonumber(Options.PointWaitTime and Options.PointWaitTime.Value or "0") or 0
+                    local new_index = point_index + 1
+                    table.insert(trinket_bot.path_points, new_index, {
+                        position = root.Position,
+                        wait_for_trinket = false,
+                        wait_time = wait_time
+                    })
+
+                    trinket_bot.selected_edit_point_index = new_index
+                    update_visualizations()
+                    select_path_point(new_index, false)
+                    library:Notify(string.format("Inserted new point #%d without removing later points", new_index))
+                end
+            })
+
+            group_trinket_bot:AddButton({
+                Text = "Delete Selected Point",
+                Func = function()
+                    local point_index = tonumber(trinket_bot.selected_edit_point_index)
+                    if not point_index or not trinket_bot.path_points[point_index] then
+                        library:Notify("Select a path point first!")
+                        return
+                    end
+
+                    table.remove(trinket_bot.path_points, point_index)
+
+                    if #trinket_bot.path_points == 0 then
+                        trinket_bot.selected_edit_point_index = nil
+                    else
+                        trinket_bot.selected_edit_point_index = math.min(point_index, #trinket_bot.path_points)
+                    end
+
+                    update_visualizations()
+                    if trinket_bot.selected_edit_point_index then
+                        select_path_point(trinket_bot.selected_edit_point_index, false)
+                    end
+                    library:Notify(string.format("Deleted point #%d; later points were re-indexed automatically", point_index))
+                end
+            })
+
             group_trinket_bot:AddDivider()
 
             group_trinket_bot:AddToggle("SkipIllusionist", {
@@ -18155,22 +18742,20 @@ end
                         if character then
                             local humanoid = character:FindFirstChildOfClass("Humanoid")
                             if humanoid then
+                                local auto_start_lives_before = read_trinket_bot_lives(1.5) or trinket_bot.last_known_lives
+
                                 auto_start_death_connection = utility:Connection(humanoid.Died, function()
                                     if auto_start_death_connection then
                                         pcall(function() auto_start_death_connection:Disconnect() end)
                                         auto_start_death_connection = nil
                                     end
 
-                                    local stay_in_server = Toggles.StayInServer and Toggles.StayInServer.Value or false
-                                    if stay_in_server then
-                                        pcall(function() library:Notify("Died during auto-start (stay in server mode)") end)
-                                        pcall(function() utility:plain_webhook("@here Bot died during auto-start (stay in server mode)") end)
-                                    else
-                                        pcall(function() library:Notify("Died during auto-start - kicking") end)
-                                        pcall(function() utility:plain_webhook("@everyone Bot died during auto-start - kicking") end)
-                                        task.wait(0.3)
-                                        plr:Kick("Bot died during auto-start")
-                                    end
+                                    resolve_trinket_bot_death(
+                                        character,
+                                        auto_start_lives_before or trinket_bot.last_known_lives,
+                                        "auto-start",
+                                        false
+                                    )
                                 end)
                             else
                                 utility:plain_webhook("@everyone CRITICAL: Humanoid not found during auto-start - kicking for safety")
@@ -19278,6 +19863,7 @@ end
                                     task.wait(1)
                                     local new_lives = Get("Lives")
                                     if new_lives then
+                                        trinket_bot.last_known_lives = new_lives
                                         local msg = string.format("Auto Popped Phoenix Down: %d → %d lives", old_lives, new_lives)
                                         library:Notify(msg)
                                         local server_name, server_region = get_server_info()
