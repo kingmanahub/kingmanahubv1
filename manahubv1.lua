@@ -13011,6 +13011,73 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                 return LocationName
             end
 
+            -- Safe Gate recovery: ground + wall/occupancy + nearby-player validation.
+            -- Reject unverified moves; never create a temporary platform over void.
+            local function FindSafeGateSpot(maxRadius)
+                local character = plr.Character
+                local root = character and character:FindFirstChild("HumanoidRootPart")
+                local hum = character and character:FindFirstChildOfClass("Humanoid")
+                if not root or not hum or hum.Health <= 0 then return nil, "no living character" end
+                local origin = root.Position
+                local ray = RaycastParams.new()
+                ray.FilterType = Enum.RaycastFilterType.Exclude
+                ray.FilterDescendantsInstances = {character}
+                ray.IgnoreWater = false
+                local overlap = OverlapParams.new()
+                overlap.FilterType = Enum.RaycastFilterType.Exclude
+                overlap.FilterDescendantsInstances = {character}
+                local function safeAt(candidate)
+                    local ground = ws:Raycast(candidate + Vector3.new(0, 7, 0), Vector3.new(0, -25, 0), ray)
+                    if not ground or ground.Material == Enum.Material.Water or ground.Normal.Y < 0.75 then return nil end
+                    if math.abs(ground.Position.Y - origin.Y) > 6 then return nil end
+                    local pos = Vector3.new(candidate.X, ground.Position.Y + 3, candidate.Z)
+                    -- Ground at center and perimeter: prevent ledge/void falls.
+                    for _, off in ipairs({Vector3.new(0,0,0), Vector3.new(3,0,0), Vector3.new(-3,0,0), Vector3.new(0,0,3), Vector3.new(0,0,-3)}) do
+                        local hit = ws:Raycast(pos + off + Vector3.new(0, 4, 0), Vector3.new(0, -9, 0), ray)
+                        if not hit or hit.Material == Enum.Material.Water or hit.Normal.Y < 0.75 or math.abs(hit.Position.Y - ground.Position.Y) > 2 then return nil end
+                    end
+                    -- Check the whole character volume instead of a single ray.
+                    for _, part in ipairs(ws:GetPartBoundsInBox(CFrame.new(pos), Vector3.new(4, 5, 4), overlap)) do
+                        if part.CanCollide and part ~= ground.Instance then return nil end
+                    end
+                    -- No noclip through a wall, even if the destination itself is clear.
+                    local delta = Vector3.new(pos.X - origin.X, 0, pos.Z - origin.Z)
+                    if delta.Magnitude > 0.5 then
+                        for _, y in ipairs({0, 2}) do
+                            local obstruction = ws:Raycast(origin + Vector3.new(0, y, 0), delta, ray)
+                            if obstruction and obstruction.Instance.CanCollide then return nil end
+                        end
+                    end
+                    for _, other in ipairs(plrs:GetPlayers()) do
+                        if other ~= plr and other.Character then
+                            local otherRoot = other.Character:FindFirstChild("HumanoidRootPart")
+                            if otherRoot and (otherRoot.Position - pos).Magnitude <= 30 then return nil end
+                        end
+                    end
+                    return pos
+                end
+                -- Nearby player means immediate abort, not a risky noclip maneuver.
+                for _, other in ipairs(plrs:GetPlayers()) do
+                    if other ~= plr and other.Character then
+                        local otherRoot = other.Character:FindFirstChild("HumanoidRootPart")
+                        if otherRoot and (otherRoot.Position - origin).Magnitude <= 65 then
+                            return nil, "player near Gate: " .. other.Name
+                        end
+                    end
+                end
+                -- Search nearest candidate first; avoid large blind shifts.
+                local directions = {Vector3.new(1,0,0),Vector3.new(-1,0,0),Vector3.new(0,0,1),Vector3.new(0,0,-1),Vector3.new(1,0,1).Unit,Vector3.new(1,0,-1).Unit,Vector3.new(-1,0,1).Unit,Vector3.new(-1,0,-1).Unit}
+                for _, radius in ipairs({0, 4, 7, 10, 14, 18}) do
+                    if radius <= (maxRadius or 18) then
+                        for _, direction in ipairs(directions) do
+                            local pos = safeAt(origin + direction * radius)
+                            if pos then return pos, nil end
+                        end
+                    end
+                end
+                return nil, "no ground/wall-clear Gate location"
+            end
+
             local function Gate(where, expected_destination, retry_number)
                 if not trinket_bot.path_running then
                     return false
@@ -13356,16 +13423,33 @@ if game.PlaceId == 3541987450 or game.PlaceId == 5208655184 or game.PlaceId == 1
                                     retry_number and (" retry " .. tostring(retry_number)) or "",
                                     safe_distance or 0
                                 ))
-                                SmoothTeleport(safe_target)
-                                task.wait(0.55)
+                                local verified_target, obstacle_reason = FindSafeGateSpot(18)
+                                if not verified_target then
+                                    library:Notify("Gate footprint found, but movement unsafe: " .. tostring(obstacle_reason))
+                                    return false
+                                end
+                                if (verified_target - hrp.Position).Magnitude > 2 then
+                                    SmoothTeleport(verified_target)
+                                    task.wait(0.55)
+                                end
                             else
-                                library:Notify(string.format(
-                                    "Gate%s: no verified wide platform found nearby - attempting cast here and rescanning on retry",
-                                    retry_number and (" retry " .. tostring(retry_number)) or ""
-                                ))
+                                library:Notify("Gate: no safe footprint - refusing blind cast")
+                                return false
                             end
                         end
                     end
+                end
+
+                -- Revalidate after the footprint test: a wall/player may have moved.
+                local safe_gate_position, gate_safety_error = FindSafeGateSpot(18)
+                if not safe_gate_position then
+                    library:Notify("Gate cast blocked: " .. tostring(gate_safety_error))
+                    return false
+                end
+                local safe_root = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+                if safe_root and (safe_root.Position - safe_gate_position).Magnitude > 2 then
+                    SmoothTeleport(safe_gate_position)
+                    task.wait(0.3)
                 end
 
                 if not mana_initialized and vim then
@@ -16642,6 +16726,10 @@ end
                                     -- positively verifies arrival at the destination.
                                     while not gate_success and trinket_bot.path_running and not emergency_gate_requested and not trinket_bot.moderator_detected do
                                         retry_count = retry_count + 1
+                                        if retry_count > 2 then
+                                            library:Notify("Gate failed twice - aborting retry loop for safe serverhop")
+                                            break
+                                        end
 
                                         if not trinket_bot.path_running then
                                             break
@@ -16697,31 +16785,16 @@ end
 
                                             task.wait(0.5)
 
-                                            if not retry_platform then
-                                                character = plr.Character
-
-                                                if character and FindFirstChild(character, "HumanoidRootPart") then
-                                                    local hrp = character.HumanoidRootPart
-
-                                                    retry_platform = Instance.new("Part")
-                                                    retry_platform.Size = Vector3.new(7, 1, 7)
-                                                    retry_platform.Position = hrp.Position + Vector3.new(0, -3, 18)
-                                                    retry_platform.Anchored = true
-                                                    retry_platform.CanCollide = true
-                                                    retry_platform.Transparency = 1
-                                                    retry_platform.Parent = workspace
-
-                                                    local saved_emergency_gate = emergency_gate_requested
-                                                    emergency_gate_requested = nil
-
-                                                    trinket_bot.path_running = true
-                                                    SmoothTeleport(retry_platform.Position + Vector3.new(0, 4, 0))
-                                                    task.wait(1.5)
-
-                                                    if not emergency_gate_requested then
-                                                        emergency_gate_requested = saved_emergency_gate
-                                                    end
-                                                end
+                                            -- Retry recovery only after verifying ground and line of sight.
+                                            local safe_spot, why_unsafe = FindSafeGateSpot(18)
+                                            if not safe_spot then
+                                                library:Notify("Gate recovery unsafe: " .. tostring(why_unsafe))
+                                                break
+                                            end
+                                            local current_root = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+                                            if current_root and (safe_spot - current_root.Position).Magnitude > 2 then
+                                                SmoothTeleport(safe_spot)
+                                                task.wait(0.35)
                                             end
                                         end
 
@@ -16785,6 +16858,10 @@ end
 
                             while not gate_success and trinket_bot.path_running and not emergency_gate_requested and not trinket_bot.moderator_detected do
                                 retry_count = retry_count + 1
+                                if retry_count > 2 then
+                                    library:Notify("Gate failed twice - switching to serverhop")
+                                    break
+                                end
 
                                 if not trinket_bot.path_running then
                                     break
@@ -16850,7 +16927,12 @@ end
                                 -- Infinite retry loop only exits here if the bot was stopped, an
                                 -- emergency gate was requested, or moderator handling took over.
                                 -- Never continue the normal path with an unverified Gate.
-                                library:Notify("Gate retry interrupted - normal path will NOT continue until a Gate succeeds")
+                                library:Notify("Gate retry failed/stopped - path continuation blocked")
+                                if retry_count >= 2 and trinket_bot.path_running then
+                                    trinket_bot.path_running = false
+                                    TrinketBotServerhop("StayInServer Gate failed twice; preventing void/stuck loop", nil, true)
+                                    return
+                                end
                                 if utility then
                                     utility:plain_webhook(string.format("@here Gate to %s was interrupted before success; path continuation blocked", point.gate_location or "???"))
                                 end
